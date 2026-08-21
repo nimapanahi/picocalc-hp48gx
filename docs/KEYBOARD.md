@@ -27,9 +27,22 @@ six keys enter A-F; return to Base to activate the current calculator menus.
 
 Select the Teal context, move to OFF, and press Space. The emulator saves the
 complete Saturn state and GX RAM, sends the ordered teal-to-ON OFF sequence,
-briefly confirms that power-off is safe, and turns off the PicoCalc backlight.
-Any new physical key press restores the backlight. Use Esc/ON afterward if the
-HP ROM also needs to be awakened.
+and checks that the HP ROM keeps its LCD off continuously for 600 ms. It
+retries up to three times if OFF is missed or the LCD wakes during that check.
+It then blanks the panel and asks the PicoCalc AXP2101 power manager to remove
+system power after six seconds. Because state was already saved, PicoCalc
+shutdown still proceeds if the HP LCD never settles. Use the physical PicoCalc
+power button to start again.
+
+BIOS 1.6 and newer provide the official PMU power-off register. Immediately
+before shutdown, the emulator refreshes and displays the detected BIOS version.
+If power is not removed within nine seconds, it restores the backlight and
+reports a timeout rather than remaining dark indefinitely.
+
+## Battery
+
+The top header continuously shows the PicoCalc battery percentage. A teal `+`
+means charging; purple text warns at 15% or below.
 
 ## Direct shortcuts
 

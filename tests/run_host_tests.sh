@@ -23,7 +23,15 @@ common_sources=(
   -o "$test_dir/core_smoke"
 
 "$test_dir/core_smoke"
+
+"${CC:-cc}" -std=c11 -O2 -Wall -Wextra -Werror \
+  -I"$project_dir/src/platform" \
+  "$project_dir/tests/power_sequence_test.c" \
+  "$project_dir/src/platform/power_sequence.c" \
+  -o "$test_dir/power_sequence_test"
+
+"$test_dir/power_sequence_test"
 python3 -m py_compile "$project_dir/tools/prepare_rom.py" \
   "$project_dir/tools/make_uf2.py"
 
-echo "Host core and Python tool checks passed."
+echo "Host core, power-sequence, battery protocol, and Python tool checks passed."

@@ -62,6 +62,7 @@ add_executable(hp48gx_picocalc
   src/core/timer.c
   src/platform/keyboard.c
   src/platform/lcd.c
+  src/platform/power_sequence.c
   src/platform/platform_ui.c
   src/platform/state.c
   "${ROM_ASM}"

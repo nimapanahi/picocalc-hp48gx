@@ -116,6 +116,7 @@ void hp48_core_run(unsigned instruction_budget) {
   }
 }
 
+bool hp48_core_lcd_on(void) { return display.on != 0; }
 uint8_t *hp48_ram_data(void) { return s_ram; }
 size_t hp48_ram_size(void) { return sizeof(s_ram); }
 

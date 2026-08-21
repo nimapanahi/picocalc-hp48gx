@@ -9,6 +9,7 @@ int main(void) {
   assert(!hp48_core_init(rom, sizeof(rom) - 1));
   assert(hp48_core_init(rom, sizeof(rom)));
   assert(hp48_ram_size() == 0x40000);
+  assert(!hp48_core_lcd_on());
   hp48_key_set(0x44, true);
   assert(saturn.keybuf.rows[4] & (1 << 4));
   hp48_key_set(0x44, false);
@@ -18,4 +19,3 @@ int main(void) {
   assert(saturn.PC == 0);
   return 0;
 }
-

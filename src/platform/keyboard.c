@@ -7,8 +7,11 @@
 #include "core_runtime.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
+#include "picocalc_protocol.h"
 #include "platform_ui.h"
+#include "power_sequence.h"
 #include "state.h"
 
 #define KBD_I2C i2c1
@@ -57,22 +60,13 @@ static bool s_lshift_used;
 static bool s_rshift_used;
 static bool s_save_request;
 static bool s_nav_poweroff_active;
-static bool s_display_sleeping;
 static bool s_reset_request;
+static uint8_t s_controller_version;
 static uint32_t s_next_poll_ms;
-static uint32_t s_poweroff_next_ms;
+static uint32_t s_next_battery_ms;
 static uint16_t s_pending_context_code = 0xffff;
 static uint16_t s_nav_active_code = 0xffff;
-
-enum {
-  POWEROFF_IDLE,
-  POWEROFF_PRESS_TEAL,
-  POWEROFF_RELEASE_TEAL,
-  POWEROFF_PRESS_ON,
-  POWEROFF_RELEASE_ON,
-  POWEROFF_DARKEN
-};
-static uint8_t s_poweroff_stage = POWEROFF_IDLE;
+static power_sequence_t s_poweroff;
 
 static void setup_i2c(void) {
   i2c_init(KBD_I2C, 10 * 1000);
@@ -148,6 +142,19 @@ static bool read_fifo(uint8_t event[2]) {
 
 bool keyboard_set_lcd_backlight(uint8_t brightness) {
   return write_reg(KBD_LCD_BACKLIGHT, brightness);
+}
+
+static void update_battery_status(uint32_t now) {
+  if ((int32_t)(now - s_next_battery_ms) < 0) return;
+  s_next_battery_ms = now + 10000;
+
+  uint8_t reply[2] = {0, 0};
+  uint8_t percent = 0;
+  bool charging = false;
+  bool valid = read_reg(PICOCALC_REG_BATTERY, reply, sizeof(reply)) &&
+               reply[0] == PICOCALC_REG_BATTERY &&
+               picocalc_decode_battery(reply[1], &percent, &charging);
+  platform_ui_set_battery(percent, charging, valid);
 }
 
 static uint16_t letter_code(char c) {
@@ -316,45 +323,114 @@ static void set_hp_action(uint16_t code, bool pressed) {
   }
 }
 
-/* HP OFF is a prefix sequence, not a simultaneous key chord. Advance one
- * matrix transition per poll so the Saturn ROM executes between teal down,
- * teal up, ON down, and ON up just as it does on the real calculator. */
-static bool advance_poweroff_sequence(uint32_t now) {
-  if (s_poweroff_stage == POWEROFF_IDLE ||
-      (int32_t)(now - s_poweroff_next_ms) < 0) return false;
+static void request_system_poweroff(bool hp_off_confirmed) {
+  /* Refresh the version for a visible diagnostic, but do not use a transient
+   * read failure to suppress the command. The bounded wait below recovers
+   * safely if an old controller ignores REG_POWER_OFF. */
+  uint8_t version_reply[2] = {0, 0};
+  for (int attempt = 0; attempt < 3; ++attempt) {
+    if (read_reg(KBD_VERSION, version_reply, sizeof(version_reply)) &&
+        version_reply[1] != 0) {
+      s_controller_version = version_reply[1];
+      break;
+    }
+    sleep_ms(25);
+  }
 
-  switch (s_poweroff_stage) {
-    case POWEROFF_PRESS_TEAL:
-      hp48_key_set(0x15, true);
-      s_poweroff_stage = POWEROFF_RELEASE_TEAL;
-      s_poweroff_next_ms = now + 35;
-      platform_ui_status("OFF: TEAL PREFIX");
-      break;
-    case POWEROFF_RELEASE_TEAL:
-      hp48_key_set(0x15, false);
-      s_poweroff_stage = POWEROFF_PRESS_ON;
-      s_poweroff_next_ms = now + 35;
-      break;
-    case POWEROFF_PRESS_ON:
-      hp48_key_set(0x8000, true);
-      s_poweroff_stage = POWEROFF_RELEASE_ON;
-      s_poweroff_next_ms = now + 70;
-      platform_ui_status("STATE SAVED - SENDING OFF");
-      break;
-    case POWEROFF_RELEASE_ON:
-      hp48_key_set(0x8000, false);
-      s_poweroff_stage = POWEROFF_DARKEN;
-      s_poweroff_next_ms = now + 750;
-      platform_ui_status("STATE SAVED - SAFE TO POWER OFF");
-      break;
-    case POWEROFF_DARKEN:
-      keyboard_set_lcd_backlight(0);
-      s_display_sleeping = true;
-      s_poweroff_stage = POWEROFF_IDLE;
-      break;
-    default:
-      s_poweroff_stage = POWEROFF_IDLE;
+  char message[48];
+  if (hp_off_confirmed) {
+    snprintf(message, sizeof(message), "KBD BIOS %u.%u - PICO OFF IN 6S",
+             s_controller_version >> 4, s_controller_version & 0x0f);
+  } else {
+    snprintf(message, sizeof(message), "STATE SAFE - PICO OFF (BIOS %u.%u)",
+             s_controller_version >> 4, s_controller_version & 0x0f);
+  }
+  platform_ui_status(message);
+  sleep_ms(350);
+
+  /* The keyboard MCU blocks while its PMU countdown runs, so blank the panel
+   * before sending REG_POWER_OFF. If power is not removed after a bounded
+   * wait, resume and restore the panel instead of hanging. */
+  keyboard_set_lcd_backlight(0);
+  bool requested = false;
+  for (int attempt = 0; attempt < 3 && !requested; ++attempt) {
+    requested = write_reg(PICOCALC_REG_POWER_OFF,
+                          PICOCALC_POWER_OFF_DELAY_SECONDS);
+    if (!requested) sleep_ms(25);
+  }
+  if (requested) {
+    printf("[HP48] PicoCalc PMU shutdown requested (HP LCD %s)\n",
+           hp_off_confirmed ? "confirmed off" : "unstable; state saved");
+    stdio_flush();
+    uint64_t deadline_us = time_us_64() + 9000000ull;
+    while (time_us_64() < deadline_us) sleep_ms(20);
+    keyboard_set_lcd_backlight(192);
+    power_sequence_reset(&s_poweroff);
+    snprintf(message, sizeof(message), "PICO OFF TIMEOUT - KBD BIOS %u.%u",
+             s_controller_version >> 4, s_controller_version & 0x0f);
+    platform_ui_status(message);
+    printf("[HP48] PicoCalc PMU did not remove power before timeout\n");
+  } else {
+    keyboard_set_lcd_backlight(192);
+    power_sequence_reset(&s_poweroff);
+    platform_ui_status("PICO POWER-OFF FAILED - STATE SAFE");
+  }
+}
+
+/* HP OFF is a prefix sequence, not a simultaneous key chord. The sequence
+ * advances one matrix transition per poll, verifies that the ROM actually
+ * disabled its LCD, retries if necessary, and only then asks the PicoCalc PMU
+ * to remove system power. */
+static bool advance_poweroff_sequence(uint32_t now) {
+  power_action_t action =
+      power_sequence_poll(&s_poweroff, now, hp48_core_lcd_on());
+  switch (action) {
+    case POWER_ACTION_NONE:
       return false;
+    case POWER_ACTION_PRESS_TEAL: {
+      hp48_key_set(0x15, true);
+      char message[48];
+      snprintf(message, sizeof(message), "OFF ATTEMPT %u/%u: TEAL",
+               (unsigned)power_sequence_attempts(&s_poweroff),
+               (unsigned)POWER_SEQUENCE_MAX_ATTEMPTS);
+      platform_ui_status(message);
+      break;
+    }
+    case POWER_ACTION_RELEASE_TEAL:
+      hp48_key_set(0x15, false);
+      break;
+    case POWER_ACTION_PRESS_ON:
+      hp48_key_set(0x8000, true);
+      platform_ui_status("STATE SAVED - SENDING HP OFF");
+      break;
+    case POWER_ACTION_RELEASE_ON:
+      hp48_key_set(0x8000, false);
+      platform_ui_status("WAITING FOR HP LCD OFF...");
+      break;
+    case POWER_ACTION_HP_OFF_DETECTED:
+      platform_ui_status("HP LCD OFF - VERIFYING...");
+      break;
+    case POWER_ACTION_HP_OFF_REAWAKENED:
+      hp48_key_set(0x15, false);
+      hp48_key_set(0x8000, false);
+      platform_ui_status("HP LCD WOKE - RETRYING OFF");
+      break;
+    case POWER_ACTION_HP_OFF_CONFIRMED:
+      platform_ui_status("HP OFF CONFIRMED - PICO OFF IN 6S");
+      break;
+    case POWER_ACTION_REQUEST_SYSTEM_OFF:
+      request_system_poweroff(true);
+      break;
+    case POWER_ACTION_REQUEST_SYSTEM_OFF_UNCONFIRMED:
+      hp48_key_set(0x15, false);
+      hp48_key_set(0x8000, false);
+      request_system_poweroff(false);
+      break;
+    case POWER_ACTION_FAILED:
+      hp48_key_set(0x15, false);
+      hp48_key_set(0x8000, false);
+      platform_ui_status("HP OFF NOT CONFIRMED - STATE SAFE");
+      break;
   }
   return true;
 }
@@ -365,15 +441,6 @@ static void handle_event(uint8_t state, uint8_t key) {
   if (!down && !up) return;
 
   printf("[HP48] key state=%u code=0x%02x\n", state, key);
-
-  /* Software OFF blanks the PicoCalc panel after saving. Any fresh press
-   * restores the backlight so the user can wake the calculator without a
-   * power cycle. Continue processing that same press normally. */
-  if (s_display_sleeping && state == K_PRESS) {
-    keyboard_set_lcd_backlight(192);
-    s_display_sleeping = false;
-    platform_ui_status("DISPLAY WAKE - STATE WAS SAVED");
-  }
 
   /* The physical cursor is the user's finger. The full HP arrow cluster is
    * drawn and selectable, but the PicoCalc arrows themselves move the finger. */
@@ -408,11 +475,13 @@ static void handle_event(uint8_t state, uint8_t key) {
         clear_pending_context();
         platform_ui_status("SAVING BEFORE OFF...");
         if (state_save()) {
-          s_poweroff_stage = POWEROFF_PRESS_TEAL;
-          s_poweroff_next_ms = to_ms_since_boot(get_absolute_time());
+          hp48_key_set(0x15, false);
+          hp48_key_set(0x8000, false);
+          power_sequence_start(&s_poweroff,
+                               to_ms_since_boot(get_absolute_time()));
           platform_ui_status("STATE SAVED - STARTING OFF");
         } else {
-          s_poweroff_stage = POWEROFF_IDLE;
+          power_sequence_reset(&s_poweroff);
           platform_ui_status("SAVE FAILED - OFF CANCELED");
         }
       } else if (s_nav_active_code == 0x25 || s_nav_active_code == 0x15 ||
@@ -531,6 +600,7 @@ static void handle_event(uint8_t state, uint8_t key) {
 }
 
 bool keyboard_init(void) {
+  power_sequence_reset(&s_poweroff);
   setup_i2c();
   uint32_t boot_ms = to_ms_since_boot(get_absolute_time());
   if (boot_ms < 2500) sleep_ms(2500 - boot_ms);
@@ -546,9 +616,14 @@ bool keyboard_init(void) {
     if (read_reg(KBD_VERSION, version_reply, sizeof(version_reply))) {
       bool config_ok = write_reg(KBD_CONFIG, KBD_DEFAULT_CONFIG);
       bool backlight_ok = keyboard_set_lcd_backlight(192);
-      printf("[HP48] PicoCalc controller v%u, config %s, backlight %s\n",
-             version_reply[1], config_ok ? "ok" : "write failed",
-             backlight_ok ? "on" : "write failed");
+      s_controller_version = version_reply[1];
+      printf("[HP48] PicoCalc controller v%u.%u, config %s, backlight %s, "
+             "PMU off register %s\n",
+             version_reply[1] >> 4, version_reply[1] & 0x0f,
+             config_ok ? "ok" : "write failed",
+             backlight_ok ? "on" : "write failed",
+             picocalc_bios_supports_power_off(version_reply[1])
+                 ? "expected" : "not expected");
       return true;
     }
     sleep_ms(100);
@@ -565,6 +640,7 @@ bool keyboard_poll(void) {
    * Saturn CPU between a queued press and release. */
   s_next_poll_ms = now + 15;
   if (advance_poweroff_sequence(now)) return true;
+  update_battery_status(now);
   /* Deliver exactly one queued event, then return to the Saturn CPU.  If a
    * complete tap (press + release) is drained here in one call, the ROM never
    * executes while its matrix bit is down and therefore sees no key at all. */

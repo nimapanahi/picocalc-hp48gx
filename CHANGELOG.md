@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.0.0 - 2026-08-21
+
+First stable release of the native HP 48GX revision-R emulator for PicoCalc
+with Raspberry Pi Pico 2 W.
+
+- Runs the HP 48GX revision-R ROM with persistent calculator state, real-time
+  clock behavior, timers, annunciators, and an enlarged aligned LCD.
+- Provides a complete navigable 49-key HP keyboard with six aligned softkeys,
+  purple and teal prefix contexts, Alpha and Alpha Lock, and dependable
+  physical Enter and direct-key shortcuts.
+- Saves state before OFF, verifies and retries the HP teal→ON sequence, detects
+  LCD reawakening, and requests full PicoCalc PMU shutdown through keyboard
+  BIOS 1.6. A bounded timeout prevents a failed PMU request from hanging dark.
+- Displays PicoCalc battery percentage, charging status, and a low-battery
+  warning in the header.
+- Includes a ROM-free UF2 template and local builder; no HP ROM is distributed
+  in the repository or public release assets.
+
+## 1.0.0-rc.10 - 2026-08-21
+
+- Fixes the HP LCD-off race by requiring the emulated LCD to remain off
+  continuously for 600 ms. If it wakes during verification, the complete
+  teal→ON sequence is retried instead of accepting a momentary OFF state.
+- Extends the per-attempt HP OFF processing window to six seconds.
+- Guarantees PicoCalc shutdown after the calculator state has been saved: if
+  the HP LCD never settles after three attempts, the firmware still asks the
+  PMU to power off. This is safe because the restorable state was committed
+  before the first OFF attempt.
+
+## 1.0.0-rc.9 - 2026-08-21
+
+- Removes the cached keyboard-power capability decision. After confirmed HP
+  OFF, the firmware refreshes and displays the controller version, then sends
+  the official power-off command even if that diagnostic read was transient.
+- Adds a nine-second recovery timeout: if the PMU does not remove power, the
+  RP2350 resumes and restores the backlight instead of remaining dark forever.
+- Gives the HP ROM substantially longer prefix, settle, and ON-key intervals,
+  plus a clean 250 ms start delay, to make teal→ON OFF reliable on hardware.
+
+## 1.0.0-rc.8 - 2026-08-21
+
+- Fixes a false `UPDATE KEYBOARD BIOS FOR PICO OFF` warning on the official
+  PicoCalc keyboard BIOS 1.6. Power-off support is now determined from the
+  controller's authoritative version byte (`0x16` or newer), rather than a
+  transient boot-time read of the power-off command register.
+- Keeps the safe version gate for older keyboard firmware and retains retry
+  handling for the actual `0x0E` shutdown request.
+
+## 1.0.0-rc.7 - 2026-08-20
+
+- Makes drawn teal `OFF` deterministic: the firmware now uses longer key
+  transitions, checks the emulated HP LCD state, and retries the complete
+  teal→ON sequence up to three times instead of blindly darkening the panel.
+- Saves before OFF as before, but proceeds only after the HP ROM confirms OFF.
+  A failed save or three failed OFF attempts leaves the PicoCalc running with
+  an explicit safe-state message.
+- After HP OFF is confirmed, writes the official PicoCalc keyboard-controller
+  power-off register. The AXP2101 PMU removes system power after its six-second
+  safety delay, while the RP2350 immediately enters an idle halt loop.
+- Probes for the PMU power-off register at boot and refuses to halt on older
+  keyboard BIOS versions that do not implement it, preventing a false OFF.
+- Adds persistent PicoCalc battery percentage to the top header. A trailing
+  `+` and teal text indicate charging; low battery text changes to purple.
+
 ## 1.0.0-rc.6 - 2026-08-20
 
 This is the first release using Semantic Versioning. Earlier `v1.x` and

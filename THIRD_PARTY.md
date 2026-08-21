@@ -16,10 +16,13 @@ text.
 
 ## ClockworkPi PicoCalc
 
-LCD pins, keyboard I2C pins/address/protocol, key codes, and the ILI9488 setup
-sequence follow ClockworkPi's public PicoCalc examples:
+LCD pins, keyboard I2C pins/address/protocol, key codes, battery register
+`0x0B`, PMU power-off register `0x0E`, and the ILI9488 setup sequence follow
+ClockworkPi's public PicoCalc examples:
 
 - <https://github.com/clockworkpi/PicoCalc>
+- <https://github.com/clockworkpi/PicoCalc/blob/master/Code/picocalc_keyboard/reg.h>
+- <https://github.com/clockworkpi/PicoCalc/blob/master/Code/picocalc_keyboard/picocalc_keyboard.ino>
 
 No ClockworkPi source file is copied wholesale into this project.
 

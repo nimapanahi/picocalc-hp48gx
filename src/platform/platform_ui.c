@@ -103,6 +103,9 @@ static const nav_key_t s_nav_keys[] = {
 
 static bool s_text_mode;
 static bool s_nav_pressed;
+static bool s_battery_valid;
+static bool s_battery_charging;
+static uint8_t s_battery_percent;
 static int s_nav_selected = 30; /* Start on 7, near the numeric-entry area. */
 static uint8_t s_prefix = PREFIX_BASE;
 static char s_status[48] = "ARROWS MOVE SPACE=KEY ENTER=ENTER";
@@ -169,10 +172,28 @@ static void draw_prefix_header(void) {
   lcd_draw_text(315 - text_w, 7, name, color, C_PANEL, 1);
 }
 
+static void draw_battery_header(void) {
+  char label[12];
+  if (s_battery_valid) {
+    snprintf(label, sizeof(label), "BAT %u%%%c", (unsigned)s_battery_percent,
+             s_battery_charging ? '+' : ' ');
+  } else {
+    snprintf(label, sizeof(label), "BAT --");
+  }
+  lcd_fill_rect(178, 5, 62, 10, C_PANEL);
+  int text_w = (int)strlen(label) * 6 - 1;
+  lcd_draw_text(239 - text_w, 7, label,
+                s_battery_charging ? C_TEAL
+                : s_battery_valid && s_battery_percent <= 15 ? C_PURPLE
+                : C_MUTED,
+                C_PANEL, 1);
+}
+
 static void draw_static_ui(void) {
   lcd_fill(C_BG);
   lcd_fill_rect(0, 0, 320, 20, C_PANEL);
   lcd_draw_text(5, 7, "HP48GX R", C_TEXT, C_PANEL, 1);
+  draw_battery_header();
   draw_prefix_header();
 
   lcd_fill_rect(7, 20, 306, 150, C_BORDER);
@@ -235,6 +256,16 @@ void platform_ui_present_lcd(const uint8_t bitmap[64][17], uint8_t annunciators,
 void platform_ui_set_text_mode(bool enabled) {
   s_text_mode = enabled;
   draw_status();
+}
+
+void platform_ui_set_battery(uint8_t percent, bool charging, bool valid) {
+  if (valid && percent > 100) valid = false;
+  if (s_battery_valid == valid && s_battery_charging == charging &&
+      (!valid || s_battery_percent == percent)) return;
+  s_battery_valid = valid;
+  s_battery_charging = charging;
+  s_battery_percent = percent;
+  draw_battery_header();
 }
 
 void platform_ui_status(const char *message) {

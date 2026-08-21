@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/nimapanahi/picocalc-hp48gx/actions/workflows/ci.yml/badge.svg)](https://github.com/nimapanahi/picocalc-hp48gx/actions/workflows/ci.yml)
 
-Current version: **1.0.0 RC6** (`v1.0.0-rc.6`)
+Current version: **1.0.0** (`v1.0.0`)
 
 This is a standalone native emulator for a ClockworkPi PicoCalc fitted with the
 standard Raspberry Pi Pico 2 W. It runs the public HP 48GX revision-R ROM,
@@ -47,7 +47,7 @@ the file named `template`; only flash the newly created file.
 4. Copy `hp48gx_picocalc.uf2` to that drive. It will reboot automatically.
 
 After reboot, allow about three seconds for the PicoCalc keyboard controller to
-start. Version 1.0.0 RC6 explicitly turns the LCD backlight on, resets and validates
+start. Version 1.0.0 explicitly turns the LCD backlight on, resets and validates
 the keyboard bus, then drives the
 ILI9488-style panel through RP2350 PIO using SPI mode 3 and three-byte RGB666
 pixels at a conservative 10 MHz.
@@ -63,7 +63,7 @@ arrow cluster and all six A–F softkeys. The PicoCalc arrows move the yellow
 highlight; they do not directly press the drawn HP arrow keys. Move the
 highlight onto an HP arrow or softkey and press Space to use it.
 
-RC6 retains RC5's enlarged 300×146 calculator LCD and compact 300×133
+The current layout retains the enlarged 300×146 calculator LCD and compact 300×133
 keyboard. The LCD is divided into six
 50-pixel soft-menu zones, and each 48-pixel A–F key is centered exactly beneath
 its corresponding zone. This makes the on-screen menu-to-softkey relationship
@@ -101,7 +101,7 @@ to activate the calculator's current softkey menus.
 | Esc | ON / cancel / wake |
 | Tap and release Left Shift by itself | HP left prefix and purple on-screen legends |
 | Tap and release Right Shift by itself | HP right prefix and teal on-screen legends |
-| Teal context, highlight `OFF`, then Space | Save state, then send the real HP teal→ON OFF sequence |
+| Teal context, highlight `OFF`, then Space | Save, verify HP OFF, then soft-power-off the PicoCalc |
 | Hold Shift with a printed symbol | That symbol directly; e.g. Shift+8 is HP multiply |
 | 0–9, `.`, `+`, `-`, `*`, `/` | Matching HP number/operator key |
 | A–Z | Optional shortcut to the HP key carrying that alpha letter |
@@ -124,18 +124,38 @@ are currently unused.
 ## Saving and turning off
 
 To finish a session, select the teal context, move the highlight to `OFF`, and
-press Space. RC6 saves immediately inside the keyboard-event path, so saving
-also works while the Saturn CPU is already in its normal idle `SHUTDN` loop.
-Only after that succeeds does it send teal press/release followed by ON
-press/release, with Saturn CPU time between every transition.
+press Space. Version 1.0.0 saves immediately inside the keyboard-event path,
+so saving also works while the Saturn CPU is already in its normal idle
+`SHUTDN` loop.
+It then sends a deliberately paced teal press/release followed by ON
+press/release and watches the emulated HP LCD power bit. If the HP ROM does not
+turn its display off within six seconds, or turns off but wakes again during
+the 600 ms stability check, the complete sequence is retried up to three times.
 
-The footer briefly says `STATE SAVED - SAFE TO POWER OFF`, then the PicoCalc
-backlight turns off. You can then use the physical power switch. On the next
-boot the saved calculator stack, variables, modes, and RAM are restored
-automatically. If saving fails, OFF is canceled and the footer says so; do not
-cut power under that condition. If you do not use the power switch, press any
-key to restore the panel backlight, then press the physical Esc/ON key to wake
-the HP ROM if necessary.
+After `HP OFF CONFIRMED` appears, the firmware asks the PicoCalc keyboard
+controller and its AXP2101 power manager to remove system power. The backlight
+turns off while the PMU completes shutdown after its required six-second
+safety delay. On the next physical power-on, the saved
+calculator stack, variables, modes, and RAM are restored automatically. An
+unstable HP LCD still proceeds to PicoCalc shutdown because state is already
+safe; a failed save or failed PMU request leaves the unit running and displays
+the failure instead of pretending shutdown succeeded.
+
+Full system shutdown requires a PicoCalc keyboard BIOS that implements the
+official `0x0E` power-off register (added upstream in August 2025 and present
+in BIOS 1.6 and newer). Version 1.0.0 reports the detected controller version
+immediately before requesting shutdown. Once state saving succeeds, it
+requests PicoCalc shutdown even if the HP LCD never settles after three
+attempts. If the PMU does not remove power within nine seconds, it restores the
+backlight and reports a timeout instead of hanging.
+
+## PicoCalc battery indicator
+
+The top header shows `BAT nn%`, read from the official PicoCalc keyboard
+controller battery register. A trailing `+` in teal means the batteries are
+charging. Readings at or below 15% are purple. The controller refreshes its
+fuel-gauge value periodically, so a new reading can take several seconds to
+appear after power or charging changes.
 
 ## State and storage
 
@@ -154,7 +174,8 @@ the saved state.
 - Full 49-key navigable HP 48GX keyboard with geometric four-way selection
 - Purple, teal, and Alpha one-shot/lock contexts with changing legends and no
   continuously held HP modifier matrix key while navigating
-- Automatic state save followed by a correctly timed HP teal→ON OFF sequence
+- Verified and retryable HP teal→ON OFF followed by PicoCalc PMU soft shutdown
+- PicoCalc battery percentage and charging indicator
 - HP real-time clock, Timer 1/2 interrupts, ON/wake, and shutdown behavior
 - Direct ILI9488 LCD and STM32 keyboard-controller drivers for PicoCalc
 - ROM validation and a ROM-free UF2 patching workflow
@@ -171,7 +192,7 @@ connected during development.
 - Confirm you flashed `hp48gx_picocalc.uf2`, not the ROM-free file whose name
   contains `template`.
 - Power the PicoCalc fully off for ten seconds, then start it and wait five
-  seconds. A normal boot briefly shows `HP48GX 1.0.0 RC6`, then the drawn
+  seconds. A normal boot briefly shows `HP48GX 1.0.0`, then the drawn
   keyboard appears below the HP display.
 - If it is still blank, note whether the panel is completely unlit or is lit
   gray/black. That distinction identifies backlight/power versus LCD-data
@@ -190,7 +211,7 @@ Pi Pico SDK 2.3.0. Set `PICO_SDK_PATH`, then run:
 
 The result is `build/hp48gx_picocalc.uf2`. The configuration targets
 `pico2_w`, runs the RP2350 at its stock 150 MHz, and reserves the final 256 KiB of flash
-for state. A successful test build uses 272,308 bytes of SRAM and 1,153,160
+for state. A successful test build uses 272,324 bytes of SRAM and 1,154,192
 bytes of flash including the 1 MiB unpacked ROM.
 
 ## License and provenance
