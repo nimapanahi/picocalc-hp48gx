@@ -1,0 +1,26 @@
+# Build trees and compiler output
+/build*/
+*.bin
+*.dis
+*.elf
+*.elf.map
+*.hex
+
+# User-supplied HP ROMs and ROM-bearing firmware
+gxrom*
+*.rom
+*.ROM
+hp48gx_picocalc.uf2
+*-READY_TO_FLASH.uf2
+
+# Python/editor/OS noise
+__pycache__/
+*.py[cod]
+.DS_Store
+*~
+.idea/
+.vscode/
+
+# Local emulator state and serial logs
+*.state
+*.log

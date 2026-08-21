@@ -1,0 +1,4 @@
+* text=auto
+*.bat text eol=crlf
+*.pio text
+*.uf2 binary

@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run host tests
+        run: ./tests/run_host_tests.sh
+
+  pico-template:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out Pico SDK 2.3.0
+        uses: actions/checkout@v4
+        with:
+          repository: raspberrypi/pico-sdk
+          ref: 2.3.0
+          path: pico-sdk
+          submodules: recursive
+      - name: Install ARM build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc-arm-none-eabi
+      - name: Configure ROM-free firmware
+        run: cmake -S . -B build-ci -G Ninja -DPICO_SDK_PATH="$GITHUB_WORKSPACE/pico-sdk" -DROM_TEMPLATE_BUILD=ON
+      - name: Build ROM-free firmware
+        run: cmake --build build-ci
