@@ -39,13 +39,9 @@ static void test_confirmed_shutdown(void) {
          POWER_ACTION_NONE);
   assert(power_sequence_poll(&sequence, released + 50, false) ==
          POWER_ACTION_HP_OFF_DETECTED);
-  assert(power_sequence_poll(&sequence, released + 649, false) ==
-         POWER_ACTION_NONE);
-  assert(power_sequence_poll(&sequence, released + 650, false) ==
+  assert(power_sequence_poll(&sequence, released + 51, false) ==
          POWER_ACTION_HP_OFF_CONFIRMED);
-  assert(power_sequence_poll(&sequence, released + 999, false) ==
-         POWER_ACTION_NONE);
-  assert(power_sequence_poll(&sequence, released + 1000, false) ==
+  assert(power_sequence_poll(&sequence, released + 52, false) ==
          POWER_ACTION_REQUEST_SYSTEM_OFF);
   assert(!power_sequence_active(&sequence));
 }
@@ -99,6 +95,7 @@ static void test_battery_protocol(void) {
   assert(!picocalc_decode_battery(127, &percent, &charging));
   assert(PICOCALC_REG_BATTERY == 0x0b);
   assert(PICOCALC_REG_POWER_OFF == 0x0e);
+  assert(PICOCALC_KEY_POWER == 0x91);
   assert(PICOCALC_POWER_OFF_DELAY_SECONDS == 6);
   assert(PICOCALC_BIOS_POWER_OFF_MIN == 0x16);
   assert(!picocalc_bios_supports_power_off(0x15));

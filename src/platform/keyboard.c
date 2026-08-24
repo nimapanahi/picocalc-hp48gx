@@ -8,11 +8,15 @@
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "hardware/sync.h"
+#include "held_keys.h"
 #include "pico/stdlib.h"
 #include "picocalc_protocol.h"
 #include "platform_ui.h"
 #include "power_sequence.h"
+#include "prefix_sequence.h"
+#include "sound.h"
 #include "state.h"
+#include "storage.h"
 
 #define KBD_I2C i2c1
 #define KBD_SDA 6
@@ -21,9 +25,18 @@
 #define KBD_FIFO 0x09
 #define KBD_VERSION 0x01
 #define KBD_CONFIG 0x02
+#define KBD_KEY_STATUS 0x04
 #define KBD_LCD_BACKLIGHT 0x05
 #define KBD_WRITE_MASK 0x80
 #define KBD_DEFAULT_CONFIG 0xd2
+#define KBD_KEY_CAPS_LOCK 0x20
+
+/* A real HP key is normally down far longer than one 15 ms controller poll.
+ * Normalize quick PicoCalc taps so the Saturn keyboard scanner cannot miss
+ * them, while remaining well below the ROM's key-repeat delay. */
+#define HP_KEY_MIN_HOLD_MS 75
+#define HP_GAME_COMMAND_MIN_HOLD_MS 300
+#define WARM_START_TIMEOUT_MS 3000
 
 #define K_IDLE 0
 #define K_PRESS 1
@@ -53,20 +66,34 @@
 #define KEY_DEL 0xd4
 
 static bool s_ctrl;
+static bool s_alt;
 static bool s_text_mode;
 static bool s_lshift;
 static bool s_rshift;
 static bool s_lshift_used;
 static bool s_rshift_used;
 static bool s_save_request;
+static bool s_file_cycle_request;
+static bool s_file_import_request;
+static bool s_file_export_request;
+static int8_t s_speed_adjustment;
+static bool s_arrow_key_mode;
 static bool s_nav_poweroff_active;
 static bool s_reset_request;
+static bool s_warm_start_chord;
+static bool s_warm_start_pending;
+static uint32_t s_warm_start_deadline_ms;
+static uint8_t s_library_tools_page;
 static uint8_t s_controller_version;
 static uint32_t s_next_poll_ms;
 static uint32_t s_next_battery_ms;
+static uint32_t s_next_caps_sync_ms;
+static bool s_follow_controller_caps = true;
 static uint16_t s_pending_context_code = 0xffff;
 static uint16_t s_nav_active_code = 0xffff;
+static held_keys_t s_held_keys;
 static power_sequence_t s_poweroff;
+static prefix_sequence_t s_prefix_sequence;
 
 static void setup_i2c(void) {
   i2c_init(KBD_I2C, 10 * 1000);
@@ -254,30 +281,66 @@ static void show_key_press(uint8_t key, uint16_t matrix_code) {
   platform_ui_status(message);
 }
 
+static void sync_context_ui(void) {
+  platform_ui_set_context(s_text_mode, s_pending_context_code);
+}
+
 static void clear_pending_context(void) {
   s_pending_context_code = 0xffff;
-  platform_ui_set_prefix_preview(0xffff);
+  sync_context_ui();
 }
 
 static void set_pending_context(uint16_t code) {
   s_pending_context_code = code;
-  platform_ui_set_prefix_preview(code);
+  sync_context_ui();
+}
+
+static bool read_controller_caps(bool *enabled) {
+  uint8_t reply[2] = {0, 0};
+  if (!enabled || !read_reg(KBD_KEY_STATUS, reply, sizeof(reply))) return false;
+  *enabled = (reply[0] & KBD_KEY_CAPS_LOCK) != 0;
+  return true;
+}
+
+static void apply_controller_caps(bool enabled, bool announce) {
+  if (s_text_mode == enabled &&
+      (enabled ? s_pending_context_code == 0x35
+               : s_pending_context_code != 0x35))
+    return;
+  s_text_mode = enabled;
+  if (enabled) {
+    set_pending_context(0x35);
+  } else if (s_pending_context_code == 0x35) {
+    clear_pending_context();
+  } else {
+    sync_context_ui();
+  }
+  if (announce)
+    platform_ui_status(enabled ? "CAPS -> ALPHA LOCK ON"
+                               : "CAPS -> ALPHA LOCK OFF");
+}
+
+static void update_controller_caps(uint32_t now) {
+  if (!s_follow_controller_caps ||
+      (int32_t)(now - s_next_caps_sync_ms) < 0)
+    return;
+  s_next_caps_sync_ms = now + 250;
+  bool enabled;
+  if (read_controller_caps(&enabled)) apply_controller_caps(enabled, true);
 }
 
 static void toggle_pending_context(uint16_t code, const char *name) {
   if (code == 0x35) {
     if (s_pending_context_code != 0x35) {
       s_text_mode = false;
-      platform_ui_set_text_mode(false);
       set_pending_context(0x35);
       platform_ui_status("ALPHA ONE-SHOT - SELECT A-Z");
     } else if (!s_text_mode) {
       s_text_mode = true;
-      platform_ui_set_text_mode(true);
+      sync_context_ui();
       platform_ui_status("ALPHA LOCK ON - SELECT A-Z");
     } else {
       s_text_mode = false;
-      platform_ui_set_text_mode(false);
       clear_pending_context();
       platform_ui_status("ALPHA LOCK CANCELED");
     }
@@ -286,7 +349,6 @@ static void toggle_pending_context(uint16_t code, const char *name) {
 
   if (s_text_mode) {
     s_text_mode = false;
-    platform_ui_set_text_mode(false);
   }
   if (s_pending_context_code == code) {
     clear_pending_context();
@@ -300,26 +362,115 @@ static void toggle_pending_context(uint16_t code, const char *name) {
   platform_ui_status(message);
 }
 
-/* A pending context is visual/UI state while the user navigates; it is not a
- * continuously held HP matrix key. Apply its modifier and the action together
- * only for the duration of the chosen key tap. Alpha Lock then re-arms Alpha;
- * all one-shot contexts return to the base keyboard. */
+/* A pending context is never a continuously held matrix key. Drawn contexts
+ * are already latched by the ROM; controller-only contexts need an ordered
+ * prefix tap before the chosen action. Alpha Lock remains active while all
+ * one-shot contexts return to the base keyboard. */
+static void apply_prefix_transition(prefix_transition_t transition) {
+  if (transition.kind == PREFIX_TRANSITION_PRESS)
+    hp48_key_set(transition.code, true);
+  else if (transition.kind == PREFIX_TRANSITION_RELEASE)
+    hp48_key_set(transition.code, false);
+}
+
+static void finish_action_context(void) {
+  if (s_pending_context_code != 0xffff) {
+    hp48_key_set(s_pending_context_code, false);
+    if (s_text_mode) {
+      /* Alpha Lock stays active in the context UI. The next action checks the
+       * ROM annunciator and re-arms Alpha automatically if necessary. */
+      sync_context_ui();
+    } else {
+      clear_pending_context();
+    }
+  }
+}
+
+static void release_hp_action(held_key_release_t release) {
+  hp48_key_set(release.code, false);
+  if (release.consumes_context) finish_action_context();
+}
+
+static void finish_hp_action(void) {
+  held_key_release_t release;
+  while (held_keys_pop_any(&s_held_keys, &release))
+    release_hp_action(release);
+}
+
+static void begin_hp_action_for(uint16_t code, bool consumes_context,
+                                uint32_t minimum_hold_ms) {
+  uint32_t now = to_ms_since_boot(get_absolute_time());
+  if (held_keys_press(&s_held_keys, code, now, minimum_hold_ms,
+                      consumes_context)) {
+    hp48_key_set(code, true);
+  } else {
+    platform_ui_status("HP KEY CHORD FULL - RELEASE KEYS");
+  }
+}
+
+static void begin_hp_action_with_context(uint16_t code,
+                                         bool consumes_context) {
+  begin_hp_action_for(code, consumes_context, HP_KEY_MIN_HOLD_MS);
+}
+
+static void begin_hp_action(uint16_t code) {
+  begin_hp_action_with_context(code, false);
+}
+
+static void request_hp_action_release(uint16_t code) {
+  if (!held_keys_request_release(&s_held_keys, code))
+    hp48_key_set(code, false);
+}
+
+static bool service_hp_action_release(uint32_t now) {
+  bool released = false;
+  held_key_release_t release;
+  while (held_keys_pop_due_release(&s_held_keys, now, &release)) {
+    release_hp_action(release);
+    released = true;
+  }
+  /* Do not drain the next controller event until this action has received its
+   * full minimum down-time. The event remains safely queued in the STM32. */
+  return released || held_keys_release_waiting(&s_held_keys);
+}
+
 static void set_hp_action(uint16_t code, bool pressed) {
   if (pressed) {
     if (s_pending_context_code != 0xffff) {
-      hp48_key_set(s_pending_context_code, true);
-    }
-    hp48_key_set(code, true);
-  } else {
-    hp48_key_set(code, false);
-    if (s_pending_context_code != 0xffff) {
-      hp48_key_set(s_pending_context_code, false);
-      if (s_text_mode) {
-        set_pending_context(0x35);
+      if (hp48_prefix_latched(s_pending_context_code)) {
+        /* Trust the HP ROM's annunciator, not the contextual overlay. */
+        begin_hp_action_with_context(code, true);
       } else {
-        clear_pending_context();
+        /* The drawn tap may not have reached the ROM yet, and controller Caps
+         * has no HP matrix event. Re-arm the prefix and wait for the ROM's
+         * annunciator before delivering the action. */
+        apply_prefix_transition(prefix_sequence_start(
+            &s_prefix_sequence, s_pending_context_code, code));
+      }
+      if (code == 0x12 && s_pending_context_code == 0x15) {
+        platform_ui_status("LIBRARY CATALOG - BLANK UNTIL ATTACHED");
+        s_library_tools_page = 0;
+      } else if (code == 0x12 && s_pending_context_code == 0x25) {
+        platform_ui_status("PORT TOOLS - PRESS NXT FOR PINIT");
+        s_library_tools_page = 1;
+      } else {
+        s_library_tools_page = 0;
+      }
+    } else {
+      begin_hp_action(code);
+      if (code == 0x70 && s_library_tools_page != 0) {
+        s_library_tools_page = s_library_tools_page == 1 ? 2 : 1;
+      } else if (code == 0x84 && s_library_tools_page == 2) {
+        platform_ui_status(hp48_port2_attached()
+                               ? "PINIT SENT - P2 READY; COMMAND IS SILENT"
+                               : "PINIT SENT - NO PORT 2 CARD ATTACHED");
+        s_library_tools_page = 0;
+      } else {
+        s_library_tools_page = 0;
       }
     }
+  } else {
+    request_hp_action_release(code);
   }
 }
 
@@ -339,14 +490,18 @@ static void request_system_poweroff(bool hp_off_confirmed) {
 
   char message[48];
   if (hp_off_confirmed) {
-    snprintf(message, sizeof(message), "KBD BIOS %u.%u - PICO OFF IN 6S",
+    snprintf(message, sizeof(message), "KBD BIOS %u.%u - PMU OFF REQUEST",
              s_controller_version >> 4, s_controller_version & 0x0f);
   } else {
     snprintf(message, sizeof(message), "STATE SAFE - PICO OFF (BIOS %u.%u)",
              s_controller_version >> 4, s_controller_version & 0x0f);
   }
   platform_ui_status(message);
-  sleep_ms(350);
+
+  /* Flush and unmount removable storage before the PMU countdown. Static PWM
+   * produces no audible signal, but return it to its midpoint as well. */
+  storage_shutdown();
+  platform_sound_silence();
 
   /* The keyboard MCU blocks while its PMU countdown runs, so blank the panel
    * before sending REG_POWER_OFF. If power is not removed after a bounded
@@ -416,7 +571,7 @@ static bool advance_poweroff_sequence(uint32_t now) {
       platform_ui_status("HP LCD WOKE - RETRYING OFF");
       break;
     case POWER_ACTION_HP_OFF_CONFIRMED:
-      platform_ui_status("HP OFF CONFIRMED - PICO OFF IN 6S");
+      platform_ui_status("HP OFF CONFIRMED - REQUESTING PICO OFF");
       break;
     case POWER_ACTION_REQUEST_SYSTEM_OFF:
       request_system_poweroff(true);
@@ -435,6 +590,58 @@ static bool advance_poweroff_sequence(uint32_t now) {
   return true;
 }
 
+static void start_graceful_poweroff(const char *source) {
+  if (power_sequence_active(&s_poweroff)) return;
+
+  s_warm_start_pending = false;
+  s_nav_poweroff_active = false;
+  finish_hp_action();
+  prefix_sequence_reset(&s_prefix_sequence);
+  s_nav_active_code = 0xffff;
+  platform_ui_nav_set_pressed(false);
+  clear_pending_context();
+  hp48_key_set(0x25, false);
+  hp48_key_set(0x15, false);
+  hp48_key_set(0x35, false);
+  hp48_key_set(0x8000, false);
+  platform_ui_status(source);
+  if (state_save()) {
+    power_sequence_start(&s_poweroff,
+                         to_ms_since_boot(get_absolute_time()));
+    platform_ui_status("STATE SAVED - STARTING OFF");
+  } else {
+    power_sequence_reset(&s_poweroff);
+    platform_ui_status("SAVE FAILED - OFF CANCELED");
+  }
+}
+
+/* A library attach needs the same non-destructive OFF/ON cycle as a real
+ * calculator. Alt+Esc is a platform shortcut, so synthesize the HP
+ * keys in their required order instead of treating it as a simultaneous
+ * matrix chord. The normal input poll keeps running between every transition. */
+static void start_warm_start(uint32_t now) {
+  if (power_sequence_active(&s_poweroff)) {
+    platform_ui_status("WARM START UNAVAILABLE DURING POWER-OFF");
+    return;
+  }
+
+  finish_hp_action();
+  prefix_sequence_reset(&s_prefix_sequence);
+  s_nav_active_code = 0xffff;
+  platform_ui_nav_set_pressed(false);
+  clear_pending_context();
+  hp48_key_set(0x25, false);
+  hp48_key_set(0x15, false);
+  hp48_key_set(0x35, false);
+  hp48_key_set(0x8000, false);
+
+  s_warm_start_pending = true;
+  s_warm_start_deadline_ms = now + WARM_START_TIMEOUT_MS;
+  apply_prefix_transition(
+      prefix_sequence_start(&s_prefix_sequence, 0x15, 0x8000));
+  platform_ui_status("WARM START - SENDING TEAL, OFF, ON");
+}
+
 static void handle_event(uint8_t state, uint8_t key) {
   bool down = state == K_PRESS || state == K_HOLD;
   bool up = state == K_RELEASE;
@@ -442,10 +649,55 @@ static void handle_event(uint8_t state, uint8_t key) {
 
   printf("[HP48] key state=%u code=0x%02x\n", state, key);
 
+  /* The controller emits one KEY_POWER press for a short physical power-key
+   * tap (and no matching release). Long press remains the PMU's emergency
+   * hardware shutdown. Route the short tap through the same state-saving,
+   * HP-OFF-verifying sequence as the drawn OFF key. */
+  if (key == PICOCALC_KEY_POWER) {
+    if (state == K_PRESS)
+      start_graceful_poweroff("POWER KEY - SAVING BEFORE OFF...");
+    return;
+  }
+
+  /* Ctrl+Space latches the physical cursor cluster between UI navigation and
+   * the calculator's four real arrow matrix keys. It is deliberately a
+   * toggle, like Caps Lock, so games and stack tools can use repeated arrows
+   * without holding a modifier. */
+  if (key == ' ' && s_ctrl) {
+    if (state == K_PRESS) {
+      finish_hp_action();
+      s_arrow_key_mode = !s_arrow_key_mode;
+      platform_ui_set_arrow_key_mode(s_arrow_key_mode);
+      platform_ui_status(
+          s_arrow_key_mode ? "ARROW LOCK ON - PHYSICAL -> HP KEYS"
+                           : "ARROW LOCK OFF - ARROWS MOVE CURSOR");
+    }
+    return;
+  }
+
+  /* Native games expose timing errors much more clearly than the ROM UI.
+   * Ctrl+Left/Right changes the decoded-instruction pacing preset without
+   * consuming an HP matrix key, allowing calibration on actual hardware. */
+  if (s_ctrl && (key == KEY_LEFT || key == KEY_RIGHT)) {
+    if (state == K_PRESS) {
+      s_speed_adjustment = key == KEY_LEFT ? -1 : 1;
+      hp48_core_platform_wake();
+    }
+    return;
+  }
+
   /* The physical cursor is the user's finger. The full HP arrow cluster is
    * drawn and selectable, but the PicoCalc arrows themselves move the finger. */
   if (key == KEY_LEFT || key == KEY_RIGHT || key == KEY_UP || key == KEY_DOWN) {
-    if (state == K_PRESS) {
+    if (s_arrow_key_mode) {
+      uint16_t arrow_code = direct_code(key);
+      if (state == K_PRESS) {
+        show_key_press(key, arrow_code);
+        begin_hp_action(arrow_code);
+      } else if (state == K_RELEASE) {
+        request_hp_action_release(arrow_code);
+      }
+    } else if (state == K_PRESS) {
       platform_ui_nav_move(key == KEY_LEFT ? -1 : key == KEY_RIGHT ? 1 : 0,
                            key == KEY_UP ? -1 : key == KEY_DOWN ? 1 : 0);
       char message[48];
@@ -486,6 +738,10 @@ static void handle_event(uint8_t state, uint8_t key) {
         }
       } else if (s_nav_active_code == 0x25 || s_nav_active_code == 0x15 ||
           s_nav_active_code == 0x35) {
+        if (s_nav_active_code == 0x35) s_follow_controller_caps = false;
+        /* Send the drawn context key itself to the ROM. Previously it only
+         * changed our overlay, so a later T could arrive as bare COS. */
+        hp48_key_set(s_nav_active_code, true);
         toggle_pending_context(s_nav_active_code,
                                s_nav_active_code == 0x25 ? "LSH"
                                : s_nav_active_code == 0x15 ? "RSH" : "ALPHA");
@@ -498,6 +754,8 @@ static void handle_event(uint8_t state, uint8_t key) {
       } else if (s_nav_active_code != 0x25 && s_nav_active_code != 0x15 &&
           s_nav_active_code != 0x35) {
         set_hp_action(s_nav_active_code, false);
+      } else {
+        hp48_key_set(s_nav_active_code, false);
       }
       s_nav_active_code = 0xffff;
       platform_ui_nav_set_pressed(false);
@@ -517,7 +775,11 @@ static void handle_event(uint8_t state, uint8_t key) {
       }
       show_key_press(key, 0x44);
     }
-    hp48_key_set(0x44, down);
+    if (state == K_PRESS) begin_hp_action(0x44);
+    else if (state == K_RELEASE) request_hp_action_release(0x44);
+    if (state == K_RELEASE && s_text_mode &&
+        s_pending_context_code == 0x35)
+      sync_context_ui();
     return;
   }
 
@@ -569,38 +831,87 @@ static void handle_event(uint8_t state, uint8_t key) {
     if (s_rshift) s_rshift_used = true;
   }
 
+  /* Alt+Esc performs a warm OFF/ON cycle. Track the chord through its
+   * release so Esc cannot leak through as a second, ordinary HP ON key if the
+   * user releases Alt first. Right Shift+Esc deliberately falls through to
+   * the calculator so the PicoCalc controller's BRK chord keeps working. */
+  if (key == KEY_ESC && (s_alt || s_warm_start_chord)) {
+    if (state == K_PRESS && s_alt) {
+      s_warm_start_chord = true;
+      start_warm_start(to_ms_since_boot(get_absolute_time()));
+    } else if (state == K_RELEASE) {
+      s_warm_start_chord = false;
+    }
+    return;
+  }
+
   if (key == KEY_CTRL) {
     s_ctrl = down;
     return;
   }
-  if (key == KEY_ALT) return;
-  if (key == KEY_CAPS && state == K_PRESS) {
-    s_text_mode = !s_text_mode;
-    platform_ui_set_text_mode(s_text_mode);
-    if (s_text_mode) {
-      set_pending_context(0x35);
-      platform_ui_status("ALPHA LOCK ON - SELECT A-Z");
-    } else {
-      clear_pending_context();
-      platform_ui_status("ALPHA LOCK OFF");
+  if (key == KEY_ALT) {
+    s_alt = down;
+    return;
+  }
+  if (s_ctrl && (key == KEY_F7 || key == KEY_F8 || key == KEY_F9 ||
+                 key == KEY_F10)) {
+    if (state == K_PRESS) {
+      if (key == KEY_F7) s_file_cycle_request = true;
+      if (key == KEY_F8) {
+        s_file_import_request = true;
+        platform_ui_status("IMPORT QUEUED - WAITING FOR HP IDLE");
+      }
+      if (key == KEY_F9) s_file_export_request = true;
+      if (key == KEY_F10) s_save_request = true;
+      /* A platform-only shortcut must still leave Saturn's SHUTDN loop so
+       * main() can perform the requested SD/flash operation. Import is the
+       * exception: it must run inside SHUTDN before the wake interrupt. */
+      if (key != KEY_F8) hp48_core_platform_wake();
     }
     return;
   }
-  if (s_ctrl && key == KEY_F10 && state == K_PRESS) {
-    s_save_request = true;
+  if (key == KEY_CAPS && state == K_PRESS) {
+    s_follow_controller_caps = true;
+    bool enabled;
+    if (!read_controller_caps(&enabled)) enabled = !s_text_mode;
+    apply_controller_caps(enabled, false);
+    platform_ui_status(enabled ? "CAPS -> ALPHA LOCK ON - TYPE A-Z"
+                               : "CAPS -> ALPHA LOCK OFF");
     return;
   }
   if (s_ctrl && key == KEY_ESC && state == K_PRESS) {
+    s_warm_start_pending = false;
+    s_warm_start_chord = false;
+    prefix_sequence_reset(&s_prefix_sequence);
+    finish_hp_action();
     s_reset_request = true;
+    hp48_core_platform_wake();
     return;
   }
   if (code != 0xffff) {
-    set_hp_action(code, down);
+    /* A controller HOLD report leaves the matrix key down; replaying it would
+     * incorrectly restart an ordered prefix sequence. */
+    if (state == K_PRESS && s_arrow_key_mode && code == 0x40 &&
+        s_pending_context_code == 0xffff) {
+      /* Native presentations often scan DROP only between long effects.
+       * Arrow lock denotes game-control mode, so stretch a quick physical
+       * Backspace tap without delaying its initial matrix press. */
+      begin_hp_action_for(code, false, HP_GAME_COMMAND_MIN_HOLD_MS);
+    } else if (state == K_PRESS) {
+      set_hp_action(code, true);
+    } else if (state == K_RELEASE) {
+      set_hp_action(code, false);
+    }
   }
 }
 
 bool keyboard_init(void) {
   power_sequence_reset(&s_poweroff);
+  prefix_sequence_reset(&s_prefix_sequence);
+  held_keys_init(&s_held_keys);
+  s_alt = false;
+  s_warm_start_chord = false;
+  s_warm_start_pending = false;
   setup_i2c();
   uint32_t boot_ms = to_ms_since_boot(get_absolute_time());
   if (boot_ms < 2500) sleep_ms(2500 - boot_ms);
@@ -640,7 +951,41 @@ bool keyboard_poll(void) {
    * Saturn CPU between a queued press and release. */
   s_next_poll_ms = now + 15;
   if (advance_poweroff_sequence(now)) return true;
+  if (service_hp_action_release(now)) return true;
+  if (prefix_sequence_active(&s_prefix_sequence)) {
+    prefix_transition_t transition = prefix_sequence_advance(
+        &s_prefix_sequence,
+        hp48_prefix_latched(s_prefix_sequence.prefix_code));
+    if (transition.kind == PREFIX_TRANSITION_PRESS &&
+        !prefix_sequence_active(&s_prefix_sequence) &&
+        transition.code == s_prefix_sequence.action_code) {
+      begin_hp_action_with_context(
+          transition.code, s_pending_context_code != 0xffff);
+      if (s_warm_start_pending && transition.code == 0x8000)
+        request_hp_action_release(transition.code);
+    } else {
+      apply_prefix_transition(transition);
+    }
+    return true;
+  }
+  if (s_warm_start_pending && held_keys_empty(&s_held_keys)) {
+    if (!hp48_core_lcd_on()) {
+      /* The first ON completed the teal OFF command. A second ordinary ON
+       * wakes the sleeping ROM without clearing RAM, variables, or cards. */
+      begin_hp_action(0x8000);
+      request_hp_action_release(0x8000);
+      s_warm_start_pending = false;
+      platform_ui_status("WARM START COMPLETE - HP WAKING");
+      return true;
+    }
+    if ((int32_t)(now - s_warm_start_deadline_ms) >= 0) {
+      s_warm_start_pending = false;
+      platform_ui_status("WARM START FAILED - HP DID NOT TURN OFF");
+      return true;
+    }
+  }
   update_battery_status(now);
+  update_controller_caps(now);
   /* Deliver exactly one queued event, then return to the Saturn CPU.  If a
    * complete tap (press + release) is drained here in one call, the ROM never
    * executes while its matrix bit is down and therefore sees no key at all. */
@@ -654,4 +999,7 @@ bool keyboard_poll(void) {
 
 bool keyboard_take_save_request(void) { bool v = s_save_request; s_save_request = false; return v; }
 bool keyboard_take_reset_request(void) { bool v = s_reset_request; s_reset_request = false; return v; }
-bool keyboard_text_mode(void) { return s_text_mode; }
+bool keyboard_take_file_cycle_request(void) { bool v = s_file_cycle_request; s_file_cycle_request = false; return v; }
+bool keyboard_take_file_import_request(void) { bool v = s_file_import_request; s_file_import_request = false; return v; }
+bool keyboard_take_file_export_request(void) { bool v = s_file_export_request; s_file_export_request = false; return v; }
+int keyboard_take_speed_adjustment(void) { int v = s_speed_adjustment; s_speed_adjustment = 0; return v; }

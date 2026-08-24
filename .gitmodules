@@ -1,0 +1,3 @@
+[submodule "third_party/pico-fatfs-sd"]
+	path = third_party/pico-fatfs-sd
+	url = https://github.com/inindev/pico-fatfs-sd.git

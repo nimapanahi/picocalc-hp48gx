@@ -21,8 +21,8 @@ enum {
   PREFIX_SETTLE_MS = 300,
   ON_HOLD_MS = 220,
   HP_OFF_TIMEOUT_MS = 6000,
-  HP_OFF_STABLE_MS = 600,
-  CONFIRM_VISIBLE_MS = 350
+  HP_OFF_STABLE_MS = 0,
+  CONFIRM_VISIBLE_MS = 0
 };
 
 static bool time_reached(uint32_t now, uint32_t target) {

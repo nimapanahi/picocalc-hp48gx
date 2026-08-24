@@ -9,6 +9,7 @@
  * keyboard firmware clamps that delay to a minimum of six seconds. */
 #define PICOCALC_REG_BATTERY 0x0bu
 #define PICOCALC_REG_POWER_OFF 0x0eu
+#define PICOCALC_KEY_POWER 0x91u
 #define PICOCALC_POWER_OFF_DELAY_SECONDS 6u
 #define PICOCALC_BIOS_POWER_OFF_MIN 0x16u
 

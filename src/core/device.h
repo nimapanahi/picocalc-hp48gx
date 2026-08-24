@@ -117,11 +117,16 @@ typedef struct device_t {
 
 extern device_t device;
 extern void	check_devices      __ProtoType__((void));
-#if 0
 extern void	check_out_register __ProtoType__((void));
-#endif
 
 extern void     update_display     __ProtoType__((void));
+extern void     display_service    __ProtoType__((int force));
+extern void     display_line_counter_reset __ProtoType__((word_8 initial,
+                                                          int enabled));
+extern void     display_line_counter_set_enabled __ProtoType__((int enabled,
+                                                                word_8 initial));
+extern void     display_line_counter_configure __ProtoType__((word_8 value));
+extern word_8   display_line_counter_read __ProtoType__((void));
 extern void     redraw_display     __ProtoType__((void));
 extern void 	disp_draw_nibble   __ProtoType__((word_20 addr, word_4 val));
 extern void 	menu_draw_nibble   __ProtoType__((word_20 addr, word_4 val));

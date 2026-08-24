@@ -6,9 +6,11 @@
 
 void platform_ui_init(void);
 void platform_ui_present_lcd(const uint8_t bitmap[64][17], uint8_t annunciators,
-                             bool lcd_on, uint8_t contrast);
-void platform_ui_set_text_mode(bool enabled);
-void platform_ui_set_prefix_preview(uint16_t shift_code);
+                             bool lcd_on, uint8_t contrast,
+                             bool grayscale_hint, uint64_t capture_us);
+void platform_ui_service(uint64_t now_us);
+void platform_ui_set_context(bool text_mode, uint16_t shift_code);
+void platform_ui_set_arrow_key_mode(bool enabled);
 void platform_ui_set_battery(uint8_t percent, bool charging, bool valid);
 void platform_ui_status(const char *message);
 void platform_ui_nav_move(int dx, int dy);

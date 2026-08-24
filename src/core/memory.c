@@ -79,6 +79,7 @@
 #endif
 
 #include "hp48.h"
+#include "core_runtime.h"
 #include "device.h"
 #include "hp48_emu.h"
 #include "x48_x11.h"
@@ -126,7 +127,8 @@ void	(*write_nibble) __ProtoType__((long addr, int val));
 int	(*read_nibble) __ProtoType__((long addr));
 int	(*read_nibble_crc) __ProtoType__((long addr));
 
-static int line_counter = -1;
+static word_8 line_counter_latch;
+static int line_counter_latch_valid;
 
 static inline int
 #ifdef __FunctionProto__
@@ -156,8 +158,14 @@ int val;
   switch ((int)addr) {
     case 0x100:					/* DISPIO */
       if (val != saturn.disp_io) {
+        int was_on = display.on;
+        int will_be_on = (val & 0x8) >> 3;
+        if (was_on && !will_be_on)
+          display_line_counter_set_enabled(0, saturn.line_count);
         saturn.disp_io = val;
-        display.on = (val & 0x8) >> 3;
+        display.on = will_be_on;
+        if (!was_on && will_be_on)
+          display_line_counter_set_enabled(1, saturn.line_count);
         display.offset = val & 0x7;
         disp.offset = 2 * display.offset;
         if (display.offset > 3)
@@ -363,7 +371,8 @@ int val;
     case 0x128: case 0x129:				/* LINE_COUNT */
       saturn.line_count &= ~nibble_masks[addr - 0x128];
       saturn.line_count |= val << ((addr - 0x128) * 4);
-      line_counter = -1;
+      line_counter_latch_valid = 0;
+      display_line_counter_configure(saturn.line_count);
       if (display.lines != (saturn.line_count & 0x3f)) {
         display.lines = saturn.line_count & 0x3f;
 	if (display.lines == 0)
@@ -378,13 +387,9 @@ int val;
       fprintf(stderr, "%.5lx: DISP END: %lx\n", saturn.PC, display.disp_end);
 #endif
       return;
-    case 0x12a: case 0x12b: case 0x12c: case 0x12d:	/* Dont know yet */
-      saturn.unknown &= ~nibble_masks[addr - 0x12a];
-      saturn.unknown |= val << ((addr - 0x12a) * 4);
-#ifdef DEBUG_UNKNOWN
-      fprintf(stderr, "Unknown device @0x%ld: %.4x\n", addr, saturn.unknown);
-#endif
-      device.unknown_touched = 1;
+    case 0x12a: case 0x12b: case 0x12c: case 0x12d:
+      /* GX hardware treats these addresses as read-only mirrors of the
+       * LINECOUNT high nibble. Writes have no effect. */
       return;
     case 0x12e:						/* TIMER 1 CONTROL */
       saturn.t1_ctrl = val;
@@ -524,14 +529,24 @@ long addr;
       return (saturn.disp_addr >> ((addr - 0x120) * 4)) & 0x0f;
     case 0x125: case 0x126: case 0x127:			/* LINE_OFFSET */
       return (saturn.line_offset >> ((addr - 0x125) * 4)) & 0x0f;
-    case 0x128:	case 0x129:				/* LINE_COUNT */
-      line_counter++;
-      if (line_counter > 0x3f)
-        line_counter = -1;
-      return (((saturn.line_count & 0xc0) | (line_counter & 0x3f)) >>
-             ((addr - 0x128) * 4)) & 0x0f;
-    case 0x12a: case 0x12b: case 0x12c: case 0x12d:	/* Dont know yet */
-      return (saturn.unknown >> ((addr - 0x12a) * 4)) & 0x0f;
+    case 0x128:					/* LINE_COUNT LSB */
+      line_counter_latch = display_line_counter_read();
+      line_counter_latch_valid = 1;
+      return line_counter_latch & 0x0f;
+    case 0x129:					/* LINE_COUNT MSB */
+      if (!line_counter_latch_valid)
+        line_counter_latch = display_line_counter_read();
+      line_counter_latch_valid = 0;
+      return (((saturn.line_count & 0xc0) | (line_counter_latch & 0x3f)) >>
+              4) & 0x0f;
+    case 0x12a: case 0x12b: case 0x12c: case 0x12d:
+      /* 0x129 is mirrored through 0x12d on the GX. Refresh the six-bit
+       * scan value for each standalone mirror read while preserving DA19
+       * and M32 in the upper two bits. */
+      line_counter_latch = display_line_counter_read();
+      line_counter_latch_valid = 0;
+      return (((saturn.line_count & 0xc0) | (line_counter_latch & 0x3f)) >>
+              4) & 0x0f;
     case 0x12e:						/* TIMER 1 CONTROL */
       return saturn.t1_ctrl & 0x0f;
     case 0x12f:						/* TIMER 2 CONTROL */
@@ -614,13 +629,13 @@ int val;
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0x80000)
         {
           if (port1_is_ram)
-            saturn.port1[(addr - 0x80000) & port1_mask] = val;
+            hp48_port1_write_nibble((addr - 0x80000) & port1_mask, val);
           return;
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0x80000)
         {
           if (port2_is_ram)
-            saturn.port2[(addr - 0x80000) & port2_mask] = val;
+            hp48_port2_write_nibble((addr - 0x80000) & port2_mask, val);
           return;
         }
 #ifdef DEBUG_BAD_MEM
@@ -632,13 +647,13 @@ int val;
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0xc0000)
         {
           if (port1_is_ram)
-            saturn.port1[(addr - 0xc0000) & port1_mask] = val;
+            hp48_port1_write_nibble((addr - 0xc0000) & port1_mask, val);
           return;
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0xc0000)
         {
           if (port2_is_ram)
-            saturn.port2[(addr - 0xc0000) & port2_mask] = val;
+            hp48_port2_write_nibble((addr - 0xc0000) & port2_mask, val);
           return;
         }
 #ifdef DEBUG_BAD_MEM
@@ -655,13 +670,13 @@ int val;
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0xc0000)
         {
           if (port1_is_ram)
-            saturn.port1[(addr - 0xc0000) & port1_mask] = val;
+            hp48_port1_write_nibble((addr - 0xc0000) & port1_mask, val);
           return;
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0xc0000)
         {
           if (port2_is_ram)
-            saturn.port2[(addr - 0xc0000) & port2_mask] = val;
+            hp48_port2_write_nibble((addr - 0xc0000) & port2_mask, val);
           return;
         }
 #ifdef DEBUG_BAD_MEM
@@ -823,7 +838,7 @@ int val;
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xa0000)
           {
             if (port1_is_ram)
-              saturn.port1[(addr - 0xa0000) & port1_mask] = val;
+              hp48_port1_write_nibble((addr - 0xa0000) & port1_mask, val);
             return;
           }
 #ifdef DEBUG_BAD_MEM
@@ -841,16 +856,9 @@ int val;
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xb0000)
           {
             if (port2_is_ram)
-              saturn.port2[((saturn.bank_switch << 18) + (addr - 0xb0000))
-                           & port2_mask] = val;
-/*
-            if (port2_size > (saturn.bank_switch << 18))
-              {
-                if (port2_is_ram)
-                  saturn.port2[(saturn.bank_switch << 18)
-                               + (addr - 0xb0000)] = val;
-              }
-*/
+              hp48_port2_write_nibble(
+                  ((saturn.bank_switch << 18) + (addr - 0xb0000)) & port2_mask,
+                  val);
             return;
           }
 #ifdef DEBUG_BAD_MEM
@@ -879,22 +887,15 @@ int val;
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xc0000)
           {
             if (port1_is_ram)
-              saturn.port1[(addr - 0xc0000) & port1_mask] = val;
+              hp48_port1_write_nibble((addr - 0xc0000) & port1_mask, val);
             return;
           }
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xc0000)
           {
             if (port2_is_ram)
-              saturn.port2[((saturn.bank_switch << 18) + (addr - 0xc0000))
-                           & port2_mask] = val;
-/*
-            if (port2_size > (saturn.bank_switch << 18))
-              {
-                if (port2_is_ram)
-                  saturn.port2[(saturn.bank_switch << 18)
-                               + (addr - 0xc0000)] = val;
-              }
-*/
+              hp48_port2_write_nibble(
+                  ((saturn.bank_switch << 18) + (addr - 0xc0000)) & port2_mask,
+                  val);
             return;
           }
 #ifdef DEBUG_BAD_MEM
@@ -913,23 +914,17 @@ int val;
           if (saturn.mem_cntl[MCTL_PORT1_GX].config[1] == 0xc0000)
             {
               if (port1_is_ram)
-                saturn.port1[(addr - 0xc0000) & port1_mask] = val;
+                hp48_port1_write_nibble((addr - 0xc0000) & port1_mask, val);
               return;
             }
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_PORT2_GX].config[1] == 0xc0000)
             {
               if (port2_is_ram)
-                saturn.port2[((saturn.bank_switch << 18) + (addr - 0xc0000))
-                             & port2_mask] = val;
-/*
-              if (port2_size > (saturn.bank_switch << 18))
-                {
-                  if (port2_is_ram)
-                    saturn.port2[(saturn.bank_switch << 18)
-                                 + (addr - 0xc0000)] = val;
-                }
-*/
+                hp48_port2_write_nibble(
+                    ((saturn.bank_switch << 18) + (addr - 0xc0000)) &
+                        port2_mask,
+                    val);
               return;
             }
 #ifdef DEBUG_BAD_MEM
@@ -990,21 +985,21 @@ long addr;
     case 8: case 9: case 0xa: case 0xb:
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0x80000)
         {
-          return saturn.port1[(addr - 0x80000) & port1_mask];
+          return hp48_port1_read_nibble((addr - 0x80000) & port1_mask);
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0x80000)
         {
-          return saturn.port2[(addr - 0x80000) & port2_mask];
+          return hp48_port2_read_nibble((addr - 0x80000) & port2_mask);
         }
       return 0x00;
     case 0xc: case 0xd: case 0xe:
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0xc0000)
         {
-          return saturn.port1[(addr - 0xc0000) & port1_mask];
+          return hp48_port1_read_nibble((addr - 0xc0000) & port1_mask);
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0xc0000)
         {
-          return saturn.port2[(addr - 0xc0000) & port2_mask];
+          return hp48_port2_read_nibble((addr - 0xc0000) & port2_mask);
         }
       return 0x00;
     case 0xf:
@@ -1012,15 +1007,26 @@ long addr;
         return saturn.ram[addr - 0xf0000];
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0xc0000)
         {
-          return saturn.port1[(addr - 0xc0000) & port1_mask];
+          return hp48_port1_read_nibble((addr - 0xc0000) & port1_mask);
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0xc0000)
         {
-          return saturn.port2[(addr - 0xc0000) & port2_mask];
+          return hp48_port2_read_nibble((addr - 0xc0000) & port2_mask);
         }
       return 0x00;
   }
   return 0x00;
+}
+
+static inline int
+read_gx_rom(long addr)
+{
+  /* LINECOUNT bit DA19 is also the external ROM A19 drive on a GX. With
+   * DA19 clear, the 512 KiB ROM exposes its lower 256 KiB half in both halves
+   * of the Saturn address space; setting DA19 makes the upper half visible.
+   * Native libraries toggle this bit around ROM calls. */
+  if ((saturn.line_count & 0x80u) == 0) addr &= 0x7ffff;
+  return saturn.rom[addr];
 }
 
 int
@@ -1042,13 +1048,13 @@ long addr;
             else
               return 0x00;
           }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 1: case 2: case 3: case 5: case 6:
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 4:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x40000)
           return saturn.ram[addr - 0x40000];
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 7:
         if (addr >= 0x7f000 &&
             saturn.mem_cntl[MCTL_BANK_GX].config[0] == 0x7f000)
@@ -1088,7 +1094,7 @@ long addr;
 #endif
             return 0x7;
           }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 8:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           {
@@ -1103,7 +1109,7 @@ long addr;
             if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
               return saturn.ram[addr - 0x80000];
           }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 9:
         if (saturn.mem_cntl[0].config[0] == 0x90000)
           {
@@ -1130,34 +1136,26 @@ long addr;
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
             return saturn.ram[addr - 0x80000];
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 0xa:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
             return saturn.ram[addr - 0x80000];
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xa0000)
           {
-            return saturn.port1[(addr - 0xa0000) & port1_mask];
+            return hp48_port1_read_nibble((addr - 0xa0000) & port1_mask);
           }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 0xb:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
             return saturn.ram[addr - 0x80000];
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xb0000)
           {
-            return saturn.port2[((saturn.bank_switch << 18) + (addr - 0xb0000))
-                                & port2_mask];
-/*
-            if (port2_size > (saturn.bank_switch << 18))
-              {
-                return saturn.port2[(saturn.bank_switch << 18)
-                                    + (addr - 0xb0000)];
-              }
-            return 0x00;
-*/
+            return hp48_port2_read_nibble(
+                ((saturn.bank_switch << 18) + (addr - 0xb0000)) & port2_mask);
           }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 0xc:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0xc0000)
           {
@@ -1171,22 +1169,14 @@ long addr;
           }
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xc0000)
           {
-            return saturn.port1[(addr - 0xc0000) & port1_mask];
+            return hp48_port1_read_nibble((addr - 0xc0000) & port1_mask);
           }
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xc0000)
           {
-            return saturn.port2[((saturn.bank_switch << 18) + (addr - 0xc0000))
-                                & port2_mask];
-/*
-            if (port2_size > (saturn.bank_switch << 18))
-              {
-                return saturn.port2[(saturn.bank_switch << 18)
-                                    + (addr - 0xc0000)];
-              }
-            return 0x00;
-*/
+            return hp48_port2_read_nibble(
+                ((saturn.bank_switch << 18) + (addr - 0xc0000)) & port2_mask);
           }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
       case 0xd: case 0xe: case 0xf:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
@@ -1194,23 +1184,16 @@ long addr;
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_PORT1_GX].config[1] == 0xc0000)
             {
-              return saturn.port1[(addr - 0xc0000) & port1_mask];
+              return hp48_port1_read_nibble((addr - 0xc0000) & port1_mask);
             }
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_PORT2_GX].config[1] == 0xc0000)
             {
-              return saturn.port2[((saturn.bank_switch << 18) +
-                                  (addr - 0xc0000)) & port2_mask];
-/*
-              if (port2_size > (saturn.bank_switch << 18))
-                {
-                  return saturn.port2[(saturn.bank_switch << 18)
-                                      + (addr - 0xc0000)];
-                }
-              return 0x00;
-*/
+              return hp48_port2_read_nibble(
+                  ((saturn.bank_switch << 18) + (addr - 0xc0000)) &
+                  port2_mask);
             }
-        return saturn.rom[addr];
+        return read_gx_rom(addr);
     }
   return 0x00;
 }
@@ -1252,21 +1235,25 @@ long addr;
     case 8: case 9: case 0xa: case 0xb:
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0x80000)
         {
-          return calc_crc(saturn.port1[(addr - 0x80000) & port1_mask]);
+          return calc_crc(
+              hp48_port1_read_nibble((addr - 0x80000) & port1_mask));
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0x80000)
         {
-          return calc_crc(saturn.port2[(addr - 0x80000) & port2_mask]);
+          return calc_crc(
+              hp48_port2_read_nibble((addr - 0x80000) & port2_mask));
         }
       return 0x00;
     case 0xc: case 0xd: case 0xe:
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0xc0000)
         {
-          return calc_crc(saturn.port1[(addr - 0xc0000) & port1_mask]);
+          return calc_crc(
+              hp48_port1_read_nibble((addr - 0xc0000) & port1_mask));
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0xc0000)
         {
-          return calc_crc(saturn.port2[(addr - 0xc0000) & port2_mask]);
+          return calc_crc(
+              hp48_port2_read_nibble((addr - 0xc0000) & port2_mask));
         }
       return 0x00;
     case 0xf:
@@ -1274,11 +1261,13 @@ long addr;
         return calc_crc(saturn.ram[addr - 0xf0000]);
       if (saturn.mem_cntl[MCTL_PORT1_SX].config[0] == 0xc0000)
         {
-          return calc_crc(saturn.port1[(addr - 0xc0000) & port1_mask]);
+          return calc_crc(
+              hp48_port1_read_nibble((addr - 0xc0000) & port1_mask));
         }
       if (saturn.mem_cntl[MCTL_PORT2_SX].config[0] == 0xc0000)
         {
-          return calc_crc(saturn.port2[(addr - 0xc0000) & port2_mask]);
+          return calc_crc(
+              hp48_port2_read_nibble((addr - 0xc0000) & port2_mask));
         }
       return 0x00;
   }
@@ -1304,13 +1293,13 @@ long addr;
             else
               return calc_crc(0x00);
           }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 1: case 2: case 3: case 5: case 6:
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 4:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x40000)
           return calc_crc(saturn.ram[addr - 0x40000]);
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 7:
         if (addr >= 0x7f000 &&
             saturn.mem_cntl[MCTL_BANK_GX].config[0] == 0x7f000)
@@ -1350,7 +1339,7 @@ long addr;
 #endif
             return 0x7;
           }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 8:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           {
@@ -1365,7 +1354,7 @@ long addr;
             if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
               return calc_crc(saturn.ram[addr - 0x80000]);
           }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 9:
         if (saturn.mem_cntl[0].config[0] == 0x90000)
           {
@@ -1392,34 +1381,28 @@ long addr;
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
             return calc_crc(saturn.ram[addr - 0x80000]);
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 0xa:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
             return calc_crc(saturn.ram[addr - 0x80000]);
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xa0000)
           {
-            return calc_crc(saturn.port1[(addr - 0xa0000) & port1_mask]);
+            return calc_crc(
+                hp48_port1_read_nibble((addr - 0xa0000) & port1_mask));
           }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 0xb:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0x80000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
             return calc_crc(saturn.ram[addr - 0x80000]);
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xb0000)
           {
-            return calc_crc(saturn.port2[((saturn.bank_switch << 18) +
-                                         (addr - 0xb0000)) & port2_mask]);
-/*
-            if (port2_size > (saturn.bank_switch << 18))
-              {
-                return calc_crc(saturn.port2[(saturn.bank_switch << 18)
-                                             + (addr - 0xb0000)]);
-              }
-            return 0x00;
-*/
+            return calc_crc(hp48_port2_read_nibble(
+                ((saturn.bank_switch << 18) + (addr - 0xb0000)) &
+                port2_mask));
           }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 0xc:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0xc0000)
           {
@@ -1433,22 +1416,16 @@ long addr;
           }
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xc0000)
           {
-            return calc_crc(saturn.port1[(addr - 0xc0000) & port1_mask]);
+            return calc_crc(
+                hp48_port1_read_nibble((addr - 0xc0000) & port1_mask));
           }
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xc0000)
           {
-            return calc_crc(saturn.port2[((saturn.bank_switch << 18) +
-                                         (addr - 0xc0000)) & port2_mask]);
-/*
-            if (port2_size > (saturn.bank_switch << 18))
-              {
-                return calc_crc(saturn.port2[(saturn.bank_switch << 18)
-                                             + (addr - 0xc0000)]);
-              }
-            return 0x00;
-*/
+            return calc_crc(hp48_port2_read_nibble(
+                ((saturn.bank_switch << 18) + (addr - 0xc0000)) &
+                port2_mask));
           }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
       case 0xd: case 0xe: case 0xf:
         if (saturn.mem_cntl[MCTL_SysRAM_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_SysRAM_GX].config[1] == 0xc0000)
@@ -1456,23 +1433,17 @@ long addr;
         if (saturn.mem_cntl[MCTL_PORT1_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_PORT1_GX].config[1] == 0xc0000)
             {
-              return calc_crc(saturn.port1[(addr - 0xc0000) & port1_mask]);
+              return calc_crc(
+                  hp48_port1_read_nibble((addr - 0xc0000) & port1_mask));
             }
         if (saturn.mem_cntl[MCTL_PORT2_GX].config[0] == 0xc0000)
           if (saturn.mem_cntl[MCTL_PORT2_GX].config[1] == 0xc0000)
             {
-              return calc_crc(saturn.port2[((saturn.bank_switch << 18) +
-                                  (addr - 0xc0000)) & port2_mask]);
-/*
-              if (port2_size > (saturn.bank_switch << 18))
-                {
-                  return calc_crc(saturn.port2[(saturn.bank_switch << 18)
-                                               + (addr - 0xc0000)]);
-                }
-              return 0x00;
-*/
+              return calc_crc(hp48_port2_read_nibble(
+                  ((saturn.bank_switch << 18) + (addr - 0xc0000)) &
+                  port2_mask));
             }
-        return calc_crc(saturn.rom[addr]);
+        return calc_crc(read_gx_rom(addr));
     }
   return 0x00;
 }

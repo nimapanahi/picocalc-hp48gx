@@ -1,0 +1,2 @@
+HP48GX PicoCalc Port 1 compatibility mode marker.
+The firmware checks this filename only; its contents are ignored.

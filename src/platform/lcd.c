@@ -1,6 +1,7 @@
 #include "lcd.h"
 
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "hardware/clocks.h"
@@ -17,41 +18,91 @@
 #define LCD_RST 15
 #define LCD_W 320
 #define LCD_H 320
-#define LCD_SPI_HZ (10 * 1000 * 1000)
+#define LCD_SPI_HZ (25 * 1000 * 1000)
+#define LCD_PIO_WAIT_TIMEOUT_US 5000ull
 
 static uint8_t s_line[LCD_W * 3];
 static uint s_pio_sm;
+static uint s_pio_offset;
+static uint8_t s_hp48_levels[64][131];
+static uint8_t s_hp48_target_levels[64][131];
+static int16_t s_hp48_first_changed[64];
+static int16_t s_hp48_last_changed[64];
+static uint8_t s_hp48_target_shades[3][3];
+static uint32_t s_hp48_ink;
+static uint32_t s_hp48_paper;
+static uint32_t s_hp48_target_ink;
+static uint32_t s_hp48_target_paper;
+static bool s_hp48_bitmap_valid;
+static bool s_hp48_bitmap_busy;
+static int s_hp48_next_row;
+static int s_hp48_target_x;
+static int s_hp48_target_y;
 
 static void select(bool on) { gpio_put(LCD_CS, !on); }
 
-static inline void pio_write8(uint8_t value) {
-  pio_sm_put_blocking(LCD_PIO, s_pio_sm, (uint32_t)value << 24);
+static void recover_pio_transport(void) {
+  pio_sm_set_enabled(LCD_PIO, s_pio_sm, false);
+  pio_sm_clear_fifos(LCD_PIO, s_pio_sm);
+  pio_sm_restart(LCD_PIO, s_pio_sm);
+  pio_sm_exec(LCD_PIO, s_pio_sm,
+              pio_encode_jmp(s_pio_offset + lcd_spi_offset_entry_point));
+  pio_sm_set_pins_with_mask(LCD_PIO, s_pio_sm, 1u << LCD_SCK,
+                            (1u << LCD_SCK) | (1u << LCD_MOSI));
+  pio_sm_set_enabled(LCD_PIO, s_pio_sm, true);
 }
 
-static void pio_wait_idle(void) {
-  while (!pio_sm_is_tx_fifo_empty(LCD_PIO, s_pio_sm)) tight_loop_contents();
-  uint32_t stall = 1u << (PIO_FDEBUG_TXSTALL_LSB + s_pio_sm);
-  LCD_PIO->fdebug = stall;
-  while (!(LCD_PIO->fdebug & stall)) tight_loop_contents();
-  busy_wait_us(1);
+static bool pio_write8(uint8_t value) {
+  bool ok = true;
+  uint64_t deadline_us = time_us_64() + LCD_PIO_WAIT_TIMEOUT_US;
+  while (pio_sm_is_tx_fifo_full(LCD_PIO, s_pio_sm)) {
+    if (time_us_64() >= deadline_us) {
+      recover_pio_transport();
+      printf("[HP48] LCD PIO TX timeout; transport restarted\n");
+      ok = false;
+      break;
+    }
+    tight_loop_contents();
+  }
+  pio_sm_put(LCD_PIO, s_pio_sm, (uint32_t)value << 24);
+  return ok;
 }
 
-static void write_bytes(const uint8_t *values, size_t count) {
-  for (size_t i = 0; i < count; ++i) pio_write8(values[i]);
-  pio_wait_idle();
+static bool pio_wait_idle(void) {
+  uint64_t deadline_us = time_us_64() + LCD_PIO_WAIT_TIMEOUT_US;
+  while (!pio_sm_is_tx_fifo_empty(LCD_PIO, s_pio_sm)) {
+    if (time_us_64() >= deadline_us) {
+      recover_pio_transport();
+      printf("[HP48] LCD PIO drain timeout; transport restarted\n");
+      return false;
+    }
+    tight_loop_contents();
+  }
+  /* FIFO-empty can precede completion of the byte currently in the output
+   * shift register. At 25 MHz that byte takes under 0.4 us; two microseconds
+   * is bounded and comfortably covers it without relying on the racy TXSTALL
+   * flag. */
+  busy_wait_us(2);
+  return true;
+}
+
+static bool write_bytes(const uint8_t *values, size_t count) {
+  bool ok = true;
+  for (size_t i = 0; i < count; ++i) ok = pio_write8(values[i]) && ok;
+  return pio_wait_idle() && ok;
 }
 
 static void command(uint8_t value) {
   gpio_put(LCD_DC, 0);
   select(true);
-  write_bytes(&value, 1);
+  (void)write_bytes(&value, 1);
   select(false);
 }
 
 static void data(const uint8_t *values, size_t count) {
   gpio_put(LCD_DC, 1);
   select(true);
-  write_bytes(values, count);
+  (void)write_bytes(values, count);
   select(false);
 }
 
@@ -80,10 +131,11 @@ static void rgb_bytes(uint32_t rgb, uint8_t out[3]) {
 }
 
 void lcd_init(void) {
-  /* Current PicoCalc panels use mode-3 signaling.  Drive it with the same PIO
-   * transport as the proven ST7365P path, conservatively clocked at 10 MHz. */
-  uint offset = pio_add_program(LCD_PIO, &lcd_spi_program);
-  pio_sm_config cfg = lcd_spi_program_get_default_config(offset);
+  /* Current PicoCalc panels use mode-3 signaling. ClockworkPi's PicoCalc LCD
+   * examples drive this bus at 25 MHz; matching that rate lets a scaled HP
+   * frame finish in roughly 42 ms instead of 105 ms. */
+  s_pio_offset = pio_add_program(LCD_PIO, &lcd_spi_program);
+  pio_sm_config cfg = lcd_spi_program_get_default_config(s_pio_offset);
   sm_config_set_out_pins(&cfg, LCD_MOSI, 1);
   sm_config_set_sideset_pins(&cfg, LCD_SCK);
   sm_config_set_out_shift(&cfg, false, false, 32);
@@ -93,7 +145,7 @@ void lcd_init(void) {
   if (divider < 1) divider = 1;
   sm_config_set_clkdiv(&cfg, (float)divider);
   s_pio_sm = pio_claim_unused_sm(LCD_PIO, true);
-  pio_sm_init(LCD_PIO, s_pio_sm, offset, &cfg);
+  pio_sm_init(LCD_PIO, s_pio_sm, s_pio_offset, &cfg);
   pio_sm_set_pins_with_mask(LCD_PIO, s_pio_sm, 1u << LCD_SCK,
                             (1u << LCD_SCK) | (1u << LCD_MOSI));
   pio_sm_set_pindirs_with_mask(LCD_PIO, s_pio_sm,
@@ -153,7 +205,7 @@ void lcd_fill_rect(int x, int y, int w, int h, uint32_t rgb) {
   region(x, y, w, h);
   gpio_put(LCD_DC, 1);
   select(true);
-  for (int row = 0; row < h; ++row) write_bytes(s_line, w * 3);
+  for (int row = 0; row < h; ++row) (void)write_bytes(s_line, w * 3);
   select(false);
 }
 
@@ -212,22 +264,137 @@ void lcd_draw_text(int x, int y, const char *text, uint32_t fg, uint32_t bg, int
   }
 }
 
-void lcd_draw_hp48_bitmap(int x, int y, const uint8_t bitmap[64][17],
-                          uint32_t ink, uint32_t paper) {
-  uint8_t ink_b[3], paper_b[3];
-  rgb_bytes(ink, ink_b);
-  rgb_bytes(paper, paper_b);
-  region(x, y, HP48_LCD_RENDER_W, HP48_LCD_RENDER_H);
+static void mix_rgb_bytes(uint32_t ink, uint32_t paper, unsigned level,
+                          uint8_t out[3]) {
+  if (level > 2u) level = 2u;
+  for (int component = 0; component < 3; ++component) {
+    unsigned shift = (unsigned)(2 - component) * 8u;
+    unsigned ink_component = (ink >> shift) & 0xffu;
+    unsigned paper_component = (paper >> shift) & 0xffu;
+    unsigned mixed =
+        (paper_component * (2u - level) + ink_component * level + 1u) / 2u;
+    out[component] = (uint8_t)(mixed & 0xfcu);
+  }
+}
+
+static void lcd_queue_hp48_planes(int x, int y,
+                                  const uint8_t plane_a[64][17],
+                                  const uint8_t plane_b[64][17],
+                                  uint32_t ink, uint32_t paper) {
+  if (s_hp48_bitmap_busy) return;
+  for (unsigned level = 0; level < 3; ++level)
+    mix_rgb_bytes(ink, paper, level, s_hp48_target_shades[level]);
+
+  bool full = !s_hp48_bitmap_valid || ink != s_hp48_ink ||
+              paper != s_hp48_paper;
+  bool changed = false;
+
+  /* Compute the complete target and the dirty span of each source row before
+   * starting panel work. lcd_service() sends at most one row span per main
+   * loop, so Saturn execution, scan-counter polling, sound, and input continue
+   * between transfers without DMA, a second core, or an inter-core lock. */
+  for (int sy = 0; sy < 64; ++sy) {
+    int first_sx = 0;
+    int last_sx = 130;
+    for (int sx = 0; sx < 131; ++sx) {
+      unsigned mask = 1u << (sx & 7);
+      s_hp48_target_levels[sy][sx] =
+          (uint8_t)(((plane_a[sy][sx >> 3] & mask) != 0) +
+                    ((plane_b[sy][sx >> 3] & mask) != 0));
+    }
+    if (!full) {
+      first_sx = -1;
+      for (int sx = 0; sx < 131; ++sx) {
+        if (s_hp48_levels[sy][sx] ==
+            s_hp48_target_levels[sy][sx]) continue;
+        if (first_sx < 0) first_sx = sx;
+        last_sx = sx;
+      }
+    }
+    s_hp48_first_changed[sy] = (int16_t)first_sx;
+    s_hp48_last_changed[sy] = (int16_t)last_sx;
+    if (first_sx >= 0) changed = true;
+  }
+
+  if (!changed) return;
+  s_hp48_target_ink = ink;
+  s_hp48_target_paper = paper;
+  s_hp48_target_x = x;
+  s_hp48_target_y = y;
+  s_hp48_next_row = 0;
+  s_hp48_bitmap_busy = true;
+}
+
+static void finish_hp48_frame(void) {
+  s_hp48_ink = s_hp48_target_ink;
+  s_hp48_paper = s_hp48_target_paper;
+  s_hp48_bitmap_valid = true;
+  s_hp48_bitmap_busy = false;
+}
+
+static void service_hp48_row(void) {
+  while (s_hp48_next_row < 64 &&
+         s_hp48_first_changed[s_hp48_next_row] < 0)
+    ++s_hp48_next_row;
+  if (s_hp48_next_row >= 64) {
+    finish_hp48_frame();
+    return;
+  }
+
+  int sy = s_hp48_next_row++;
+  int first_sx = s_hp48_first_changed[sy];
+  int last_sx = s_hp48_last_changed[sy];
+
+  int first_dx = (first_sx * HP48_LCD_RENDER_W + 130) / 131;
+  int dx_after = ((last_sx + 1) * HP48_LCD_RENDER_W + 130) / 131;
+  int first_dy = (sy * HP48_LCD_RENDER_H + 63) / 64;
+  int dy_after = ((sy + 1) * HP48_LCD_RENDER_H + 63) / 64;
+  int width = dx_after - first_dx;
+  int height = dy_after - first_dy;
+
+  region(s_hp48_target_x + first_dx, s_hp48_target_y + first_dy,
+         width, height);
   gpio_put(LCD_DC, 1);
   select(true);
-  for (int dy = 0; dy < HP48_LCD_RENDER_H; ++dy) {
-    int sy = dy * 64 / HP48_LCD_RENDER_H;
-    for (int dx = 0; dx < HP48_LCD_RENDER_W; ++dx) {
-      int sx = dx * 131 / HP48_LCD_RENDER_W;
-      const uint8_t *p = (bitmap[sy][sx >> 3] & (1u << (sx & 7))) ? ink_b : paper_b;
-      memcpy(&s_line[dx * 3], p, 3);
-    }
-    write_bytes(s_line, HP48_LCD_RENDER_W * 3);
+  for (int dx = first_dx; dx < dx_after; ++dx) {
+    int sx = dx * 131 / HP48_LCD_RENDER_W;
+    const uint8_t *pixel =
+        s_hp48_target_shades[s_hp48_target_levels[sy][sx]];
+    memcpy(&s_line[(dx - first_dx) * 3], pixel, 3);
   }
+  bool ok = true;
+  for (int row = 0; row < height; ++row)
+    ok = write_bytes(s_line, (size_t)width * 3) && ok;
   select(false);
+
+  if (!ok) {
+    s_hp48_bitmap_valid = false;
+    s_hp48_bitmap_busy = false;
+    return;
+  }
+  memcpy(s_hp48_levels[sy], s_hp48_target_levels[sy],
+         sizeof(s_hp48_levels[sy]));
+
+  while (s_hp48_next_row < 64 &&
+         s_hp48_first_changed[s_hp48_next_row] < 0)
+    ++s_hp48_next_row;
+  if (s_hp48_next_row >= 64) finish_hp48_frame();
+}
+
+void lcd_draw_hp48_bitmap(int x, int y, const uint8_t bitmap[64][17],
+                          uint32_t ink, uint32_t paper) {
+  lcd_queue_hp48_planes(x, y, bitmap, bitmap, ink, paper);
+}
+
+void lcd_draw_hp48_grayscale(int x, int y,
+                             const uint8_t plane_a[64][17],
+                             const uint8_t plane_b[64][17],
+                             uint32_t ink, uint32_t paper) {
+  lcd_queue_hp48_planes(x, y, plane_a, plane_b, ink, paper);
+}
+
+bool lcd_hp48_bitmap_busy(void) { return s_hp48_bitmap_busy; }
+
+void lcd_service(void) {
+  if (s_hp48_bitmap_busy) service_hp48_row();
 }

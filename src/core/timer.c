@@ -69,7 +69,23 @@ t1_t2_ticks get_t1_t2(void) {
     access_time = (access_time << 4) | (saturn.ram[ACCESSTIME_GX + i] & 0x0f);
   }
   int64_t remaining = (int64_t)access_time - (int64_t)hp_absolute_ticks();
-  out.t2_ticks = (uint32_t)remaining;
+  uint32_t realtime_value = (uint32_t)remaining;
+  uint32_t current_value = (uint32_t)saturn.timer2;
+
+  /* TIMER2 is a wrapping down-counter. The instruction scheduler estimates
+   * its progress between wall-clock samples, but a fast emulation rate can
+   * put that estimate ahead of real time. Never move the counter backwards
+   * (up) when reconciling it. This also preserves a value just programmed by
+   * native games instead of replacing it with the older ACCESSTIME-derived
+   * value at the next scheduler adjustment. TetrisGX polls the low TIMER2
+   * nibbles continuously and otherwise becomes trapped in its frame wait. */
+  uint32_t forward_ticks = current_value - realtime_value;
+  if (forward_ticks < 0x80000000u) {
+    out.t2_ticks = realtime_value;
+  } else {
+    out.t2_ticks = current_value;
+    if (saturn.t2_tick < INT16_MAX) ++saturn.t2_tick;
+  }
   return out;
 }
 

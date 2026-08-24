@@ -95,6 +95,7 @@ static int	interrupt_called = 0;
 extern long	nibble_masks[16];
 
 int		got_alarm;
+int		hp48_core_sleeping;
 
 int		conf_bank1 = 0x00000;
 int		conf_bank2 = 0x00000;
@@ -590,6 +591,10 @@ do_shutdown()
     if (disp.display_update) refresh_display();
 #endif
   }
+  /* Capture direct framebuffer writes before the core enters the blocking
+   * SHUTDN/GetEvent loop. The PicoCalc pause hook then drains this queued
+   * snapshot to the physical LCD. */
+  display_service(1);
 
   stop_timer(RUN_TIMER);
   start_timer(IDLE_TIMER);
@@ -616,6 +621,7 @@ do_shutdown()
 
   alarms = 0;
 
+  hp48_core_sleeping = 1;
   do {
 
     pause();
@@ -684,6 +690,7 @@ do_shutdown()
         wake = 1;
       }
   } while (wake == 0);
+  hp48_core_sleeping = 0;
 
   stop_timer(IDLE_TIMER);
   start_timer(RUN_TIMER);
@@ -1084,4 +1091,3 @@ int n;
     reg[i] = read_nibble_crc(dat++);
   }
 }
-

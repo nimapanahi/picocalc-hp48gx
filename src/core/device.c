@@ -58,6 +58,9 @@
 #include "device.h"
 #include "timer.h"
 #include "x48_x11.h"
+#include "sound.h"
+
+extern unsigned long instructions;
 
 extern int device_check;
 
@@ -179,13 +182,6 @@ check_devices()
 #endif
 }
 
-#if 0
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <fcntl.h>
-
 void
 #ifdef __FunctionProto__
 check_out_register(void)
@@ -193,17 +189,5 @@ check_out_register(void)
 check_out_register()
 #endif
 {
-  static int au = -2;
-  unsigned char c[] = { 0xff, 0x00 };
-
-  if (au == -2)
-    if ((au = open("/dev/audio", O_WRONLY)) < 0)
-  if (au < 0)
-    return;
-  if (saturn.OUT[2] & 0x8)
-    write(au, c, 1);
-  else
-    write(au, &c[1], 1);
+  platform_sound_set_level((saturn.OUT[2] & 0x8) != 0, instructions);
 }
-
-#endif

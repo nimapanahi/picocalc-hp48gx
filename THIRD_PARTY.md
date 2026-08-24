@@ -14,6 +14,20 @@ The X11 UI, POSIX persistence, debugger UI, and serial backends were replaced
 with small RP2350/PicoCalc-specific implementations. See `COPYING` for the GPL
 text.
 
+## Emu48 RPL object routines
+
+The bounded HP object-size parser and stack import/export transaction in
+`src/core/rpl_object.c` are adapted from Sebastien Carlier's GPL Emu48 RPL and
+file-transfer routines:
+
+- Project: <https://github.com/dgis/emu48android>
+- Relevant sources: `app/src/main/cpp/core/rpl.c`, `files.c`, and `Emu48.h`
+- License: GNU General Public License, version 2 or later
+
+The PicoCalc adaptation replaces Emu48's full-file allocation with bounded,
+rollback-safe streaming to fit RP2350 memory and uses the standard
+`HPHP48-W` binary-object header.
+
 ## ClockworkPi PicoCalc
 
 LCD pins, keyboard I2C pins/address/protocol, key codes, battery register
@@ -25,6 +39,18 @@ ClockworkPi's public PicoCalc examples:
 - <https://github.com/clockworkpi/PicoCalc/blob/master/Code/picocalc_keyboard/picocalc_keyboard.ino>
 
 No ClockworkPi source file is copied wholesale into this project.
+
+## pico-fatfs-sd and FatFs
+
+SD-card access uses the pinned `third_party/pico-fatfs-sd` submodule, a trimmed
+RP2040/RP2350 port of the no-OS FatFs SD driver:
+
+- Project: <https://github.com/inindev/pico-fatfs-sd>
+- Driver license: Apache License 2.0
+- Included FatFs version: R0.16, under the FatFs license included upstream
+
+The dependency is kept as a Git submodule so its exact source revision and
+license remain independently visible.
 
 ## Raspberry Pi Pico SDK
 

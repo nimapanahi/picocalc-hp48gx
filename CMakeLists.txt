@@ -10,6 +10,13 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 pico_sdk_init()
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/pico-fatfs-sd/src/CMakeLists.txt")
+  message(FATAL_ERROR
+    "Missing SD-card dependency. Run: git submodule update --init --recursive")
+endif()
+add_subdirectory(third_party/pico-fatfs-sd/src
+                 "${CMAKE_BINARY_DIR}/pico-fatfs-sd")
+
 if(NOT ROM_TEMPLATE_BUILD)
   if(NOT HP48_ROM)
     message(FATAL_ERROR "Pass your HP 48GX revision-R ROM with -DHP48_ROM=/full/path/to/gxrom-r")
@@ -59,12 +66,21 @@ add_executable(hp48gx_picocalc
   src/core/emulate.c
   src/core/memory.c
   src/core/register.c
+  src/core/rpl_object.c
   src/core/timer.c
   src/platform/keyboard.c
+  src/platform/held_keys.c
   src/platform/lcd.c
+  src/platform/object_files.c
+  src/platform/port2_card.c
   src/platform/power_sequence.c
+  src/platform/prefix_sequence.c
+  src/platform/realtime_pacer.c
   src/platform/platform_ui.c
+  src/platform/sound.c
+  src/platform/sound_timing.c
   src/platform/state.c
+  src/platform/storage.c
   "${ROM_ASM}"
 )
 
@@ -87,7 +103,9 @@ target_link_libraries(hp48gx_picocalc
   hardware_gpio
   hardware_i2c
   hardware_pio
+  hardware_pwm
   hardware_sync
+  pico-fatfs-sd
 )
 
 pico_generate_pio_header(hp48gx_picocalc

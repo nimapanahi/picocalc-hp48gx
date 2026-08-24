@@ -9,6 +9,7 @@
 #include "hardware/flash.h"
 #include "hardware/sync.h"
 #include "pico/stdlib.h"
+#include "port2_card.h"
 
 #define STATE_FLASH_OFFSET (PICO_FLASH_SIZE_BYTES - 0x40000u)
 #define STATE_HEADER_BYTES 0x1000u
@@ -50,6 +51,9 @@ static bool flash_layout_ok(void) {
 
 bool state_save(void) {
   if (!flash_layout_ok()) return false;
+  /* Commit the removable card first. If that fails, leave the previous flash
+   * snapshot untouched and cancel OFF rather than creating a split save. */
+  if (!port2_card_save()) return false;
   static uint8_t header_sector[STATE_HEADER_BYTES];
   memset(header_sector, 0xff, sizeof(header_sector));
   saved_header_t *h = (saved_header_t *)header_sector;
@@ -108,6 +112,11 @@ bool state_load(void) {
   saturn.ram = ram;
   saturn.port1 = NULL;
   saturn.port2 = NULL;
+  word_4 saved_card_status = saturn.card_status;
+  hp48_port2_detach();
+  /* Keep the snapshot's slot identity long enough for main() to compare it
+   * with the SD marker before resuming attached-library tables from RAM. */
+  saturn.card_status = saved_card_status;
   dev_memory_init();
   init_display();
   return true;
