@@ -10,11 +10,13 @@ typedef enum {
   PORT2_CARD_STORAGE_ERROR,
   PORT2_CARD_BAD_IMAGE,
   PORT2_CARD_IO_ERROR,
+  PORT2_CARD_MODE_ERROR,
 } port2_card_status_t;
 
-/* Import a standard 128 KiB packed x48 card image. PORT2.CRD is the default.
- * If /HP48GX/PROGRAMS/PORT1.MODE exists, mount PORT1.CRD instead as the GX's
- * non-covered Port 1 for old machine-language library compatibility. */
+/* Import one standard 128 KiB packed x48 card image. Fresh 2.1 installations
+ * default to Port 1 so the stock ROM can merge it with user memory. Existing
+ * Port 2 images keep their legacy slot unless PORT1.MODE or PORT2.MODE makes
+ * the selection explicit. */
 port2_card_status_t port2_card_init(void);
 
 /* Export a dirty active card through its .NEW -> .CRD transaction, retaining

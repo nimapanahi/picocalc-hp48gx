@@ -56,4 +56,7 @@ hp48_rpl_status_t hp48_rpl_export_read(const hp48_rpl_export_t *transfer,
 
 unsigned hp48_rpl_stack_depth(void);
 bool hp48_rpl_stack_level1_is_directory(void);
+/* The revision-R desktop pointer moves into the Port 1 address range after
+ * the stock MERGE1 command expands user memory. */
+bool hp48_rpl_port1_is_merged(void);
 const char *hp48_rpl_status_label(hp48_rpl_status_t status);

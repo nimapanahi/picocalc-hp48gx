@@ -178,6 +178,10 @@ int main(int argc, char **argv) {
   write_nibbles(0x806f8, 0x86000, 5); /* DSKTOP */
   write_nibbles(0x806fd, 0x86005, 5); /* EDITLINE: empty stack */
   write_nibbles(0x807ed, 0x00fcc, 5); /* AVMEM */
+  assert(!hp48_rpl_port1_is_merged());
+  write_nibbles(0x806f8, 0xd6000, 5);
+  assert(hp48_rpl_port1_is_merged());
+  write_nibbles(0x806f8, 0x86000, 5);
 
   /* A native program's direct active-framebuffer write must produce a full
    * queued snapshot. Dev17's empty nibble callbacks silently lost this path. */

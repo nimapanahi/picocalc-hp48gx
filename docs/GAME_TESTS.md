@@ -1,7 +1,7 @@
 # HP48GX PicoCalc game compatibility tests
 
 These unmodified hpcalc.org objects have been exercised against the exact
-revision-R ROM used by 2.0.0. The host regression records import,
+revision-R ROM used by 2.1.0. The host regression records import,
 command invocation, display/audio activity, and fatal emulator halts. Those
 signals are not by themselves proof of gameplay: for libraries it must select
 the documented game command and inspect the resulting LCD state. The harness
@@ -18,7 +18,8 @@ renamed `ANDROID201.LIB` so it is unambiguous beside the unrelated HP 49
 version: <https://www.hpcalc.org/details/459>. It is library 1698 and includes
 the ANDROID game, the EDITANDRO level editor, and an information command.
 
-1. Enable Port 1 with `/HP48GX/PROGRAMS/PORT1.MODE` before boot.
+1. Use the fresh 2.1 Port 1 card, or select it explicitly with
+   `/HP48GX/PROGRAMS/PORT1.MODE` before boot. Keep it unmerged for libraries.
 2. Import `ANDROID201.LIB`, put `1` above the library object, and execute `STO`.
 3. Warm-start with physical Alt+Esc.
 4. Open teal/right-shift -> drawn `2` (`LIBRARY`), select ANDROID, then select
@@ -81,7 +82,8 @@ halt.
 `FROG48.LIB` is library 1256, the GX conversion contained in AS-Games:
 <https://www.hpcalc.org/details/223>.
 
-1. Enable Port 1 with `/HP48GX/PROGRAMS/PORT1.MODE` before boot.
+1. Use the fresh 2.1 Port 1 card, or select it explicitly with
+   `/HP48GX/PROGRAMS/PORT1.MODE` before boot. Keep it unmerged for libraries.
 2. Import `FROG48.LIB`, put `1` above the library object, and execute `STO`.
 3. Warm-start with physical Alt+Esc (or teal/right-shift then `ON`).
 4. Open teal/right-shift → drawn `2` (`LIBRARY`), select library 1256, then
@@ -94,8 +96,8 @@ the official archive and contains the more complex levels, grayscale, and
 sound: <https://www.hpcalc.org/details/608>. `WARIOHP20.LIB` is the smaller
 library 1697 fallback from <https://www.hpcalc.org/details/607>.
 
-1. For the reproducible emulator test, enable Port 1 with
-   `/HP48GX/PROGRAMS/PORT1.MODE` before boot.
+1. For the reproducible emulator test, use the fresh 2.1 Port 1 card or select
+   it explicitly with `/HP48GX/PROGRAMS/PORT1.MODE` before boot.
 2. Import one Wario library, put `1` above the library object, and execute
    `STO`. The original 3.1 booklet instead suggests memory Port 0 (`0 STO`);
    the 2.0.0 validation tests both placements, but neither makes 3.1 playable.
@@ -135,7 +137,8 @@ Use `MISSIMP.LIB`, an extension-only rename of the unmodified `MISSIMP.GX`
 object from the official archive: <https://www.hpcalc.org/details/543>. It is
 library 1266 and occupies about 18 KiB.
 
-1. Enable Port 1 with `/HP48GX/PROGRAMS/PORT1.MODE` before boot.
+1. Use the fresh 2.1 Port 1 card, or select it explicitly with
+   `/HP48GX/PROGRAMS/PORT1.MODE` before boot. Keep it unmerged for libraries.
 2. Import `MISSIMP.LIB`, put `1` above the library object, and execute `STO`.
 3. Press physical Alt+Esc for the warm OFF/ON cycle.
 4. Select `LEVEL` once to create the `levels.IMP` directory, enter it, and

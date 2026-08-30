@@ -1,5 +1,25 @@
 # Changelog
 
+## 2.1.0 - 2026-08-30
+
+- Promotes the writable 128 KiB virtual Port 1 RAM card from the 2.0
+  compatibility path into a supported user-memory expansion. A fresh SD card
+  now creates `PORT1.CRD`; the stock revision-R `MERGE1` command merges it
+  with the calculator's built-in 128 KiB user memory.
+- Preserves upgrades safely: an existing 2.0 `PORT2.CRD` remains selected
+  automatically. `PORT1.MODE` and the new `PORT2.MODE` explicitly select a
+  slot, while conflicting markers fail without attaching or modifying either
+  image.
+- Makes imported-object guidance merge-aware. Once Port 1 is merged, imports
+  direct the user to Ctrl+F10 rather than suggesting an invalid `:1:` backup
+  destination; Save-and-OFF persists both built-in and merged memory.
+- Adds `CARDS.TXT` to every newly prepared SD layout with the Port 1,
+  `MERGE1`, upgrade, slot-selection, save, and recovery workflow.
+- Adds an exact revision-R `MERGE1` regression that verifies the ROM expands
+  available user memory, writes the virtual card, keeps the expected memory
+  controllers configured, and does not halt. The calculator validation video
+  now shows `MEM` before and after the merge.
+
 ## 2.0.0 - 2026-08-24
 
 Feature-complete release of the project's planned native HP 48GX PicoCalc

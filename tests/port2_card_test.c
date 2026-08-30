@@ -76,6 +76,8 @@ static void clear_images(const char *root) {
   remove_if_present(path);
   make_path(path, root, "PORT1.MODE");
   remove_if_present(path);
+  make_path(path, root, "PORT2.MODE");
+  remove_if_present(path);
   make_path(path, root, "PORT1.CRD");
   remove_if_present(path);
   make_path(path, root, "PORT1.NEW");
@@ -135,8 +137,14 @@ int main(int argc, char **argv) {
 
   s_storage_ready = true;
   s_storage_status = STORAGE_READY;
+  /* Force the legacy covered slot for its transaction/recovery tests. */
+  char port1_mode[1024];
+  char port2_mode[1024];
+  make_path(port1_mode, root, "PORT1.MODE");
+  make_path(port2_mode, root, "PORT2.MODE");
+  write_pattern(port2_mode, 0, 0);
   assert(port2_card_init() == PORT2_CARD_CREATED);
-  assert(s_attached && !s_dirty);
+  assert(s_attached && !s_dirty && s_slot == HP48_CARD_PORT2);
   verify_pattern(current, HP48_PORT2_PACKED_SIZE, 0x00);
   assert(!path_exists(pending));
   assert(!path_exists(backup));
@@ -192,14 +200,10 @@ int main(int argc, char **argv) {
   verify_pattern(backup, HP48_PORT2_PACKED_SIZE, 0x77);
   assert(!path_exists(pending));
 
-  /* A marker selects a separately persisted non-covered Port 1 card for old
-   * machine-language libraries, reusing the single packed SRAM allocation. */
+  /* A fresh 2.1 installation selects Port 1 so MERGE1 can expand user RAM. */
   clear_images(root);
-  char mode[1024];
   char port1_current[1024];
-  make_path(mode, root, "PORT1.MODE");
   make_path(port1_current, root, "PORT1.CRD");
-  write_pattern(mode, 0, 0);
   assert(port2_card_init() == PORT2_CARD_CREATED);
   assert(s_attached && !s_dirty && s_slot == HP48_CARD_PORT1);
   verify_pattern(port1_current, HP48_PORT2_PACKED_SIZE, 0x00);
@@ -208,6 +212,31 @@ int main(int argc, char **argv) {
   assert(port2_card_save());
   assert(!s_dirty);
   verify_pattern(port1_current, HP48_PORT2_PACKED_SIZE, 0x48);
+
+  /* An existing 2.0 Port 2 image retains its slot without a marker. */
+  clear_images(root);
+  write_pattern(current, HP48_PORT2_PACKED_SIZE, 0x27);
+  assert(port2_card_init() == PORT2_CARD_READY);
+  assert(s_attached && !s_dirty && s_slot == HP48_CARD_PORT2);
+  assert(s_port2[0] == 0x27);
+
+  /* An explicit Port 1 marker overrides the legacy image without changing it. */
+  write_pattern(port1_mode, 0, 0);
+  assert(port2_card_init() == PORT2_CARD_CREATED);
+  assert(s_attached && !s_dirty && s_slot == HP48_CARD_PORT1);
+  verify_pattern(current, HP48_PORT2_PACKED_SIZE, 0x27);
+
+  /* Explicit markers override image discovery; conflicting markers fail
+   * safely without attaching or modifying either card image. */
+  clear_images(root);
+  write_pattern(port1_mode, 0, 0);
+  write_pattern(port2_mode, 0, 0);
+  assert(port2_card_init() == PORT2_CARD_MODE_ERROR);
+  assert(!s_attached);
+
+  remove_if_present(port2_mode);
+  assert(port2_card_init() == PORT2_CARD_CREATED);
+  assert(s_attached && s_slot == HP48_CARD_PORT1);
 
   clear_images(root);
   return 0;

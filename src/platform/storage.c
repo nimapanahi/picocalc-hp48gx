@@ -19,6 +19,7 @@
 #define HP48_SD_ROOT "0:/HP48GX"
 #define HP48_PROGRAMS_DIR HP48_SD_ROOT "/PROGRAMS"
 #define HP48_PROGRAMS_README HP48_PROGRAMS_DIR "/README.TXT"
+#define HP48_CARDS_README HP48_PROGRAMS_DIR "/CARDS.TXT"
 #define HP48_PORT2_README HP48_PROGRAMS_DIR "/PORT2.TXT"
 #define HP48_FILES_README HP48_PROGRAMS_DIR "/FILES.TXT"
 #define HP48_INBOX_DIR HP48_PROGRAMS_DIR "/INBOX"
@@ -66,7 +67,7 @@ static bool create_programs_readme(void) {
       "HP 48GX PicoCalc program folder\r\n"
       "\r\n"
       "Version " HP48GX_VERSION " supports a writable card and files.\r\n"
-      "Read PORT2.TXT and FILES.TXT for the two storage workflows.\r\n"
+      "Read CARDS.TXT and FILES.TXT for the two storage workflows.\r\n"
       "Existing user files are not modified or deleted.\r\n";
   FIL file;
   FRESULT result = f_open(&file, HP48_PROGRAMS_README,
@@ -106,21 +107,45 @@ static bool create_files_readme(void) {
 
 static bool create_port2_readme(void) {
   static const char contents[] =
-      "HP 48GX PicoCalc Port 2 card - version " HP48GX_VERSION "\r\n"
+      "HP 48GX PicoCalc legacy Port 2 guide - version " HP48GX_VERSION "\r\n"
       "\r\n"
+      "Read CARDS.TXT for current Port 1 expansion and slot selection.\r\n"
       "PORT2.CRD is a standard packed 128 KiB x48-compatible card image.\r\n"
       "The emulator imports it at boot and exports changes on Ctrl+F10 or OFF.\r\n"
       "PORT2.BAK is the previous committed image; PORT2.NEW is temporary.\r\n"
-      "For old machine-code libraries, create PORT1.MODE before boot.\r\n"
-      "That selects separate PORT1.CRD/NEW/BAK files; store libraries to 1.\r\n"
-      "Remove PORT1.MODE while powered off to return to the Port 2 image.\r\n"
       "Power the PicoCalc off before removing the SD card or replacing files.\r\n"
       "Initialize a blank card: left-shift, 2, NXT, PINIT.\r\n"
       "Right-shift, 2 is the attached-library catalog; blank is normal.\r\n"
       "PINIT is silent when the card is already empty and initialized.\r\n"
-      "Use :1: NAME in Port 1 mode, or :2: NAME otherwise; then STO.\r\n";
+      "Use :2: NAME and STO for Port 2 backup objects.\r\n";
   FIL file;
   FRESULT result = f_open(&file, HP48_PORT2_README,
+                          FA_WRITE | FA_CREATE_NEW);
+  if (result == FR_EXIST) return true;
+  if (result != FR_OK) return false;
+
+  UINT written = 0;
+  result = f_write(&file, contents, sizeof(contents) - 1, &written);
+  FRESULT close_result = f_close(&file);
+  return result == FR_OK && close_result == FR_OK &&
+         written == sizeof(contents) - 1;
+}
+
+static bool create_cards_readme(void) {
+  static const char contents[] =
+      "HP 48GX PicoCalc virtual RAM card - version " HP48GX_VERSION "\r\n"
+      "\r\n"
+      "Fresh installations create a writable 128 KiB PORT1.CRD.\r\n"
+      "The stock HP 48GX MERGE1 command adds it to built-in user memory.\r\n"
+      "After MERGE1, Ctrl+F10 or Save-and-OFF saves both memory regions.\r\n"
+      "An existing 2.0 PORT2.CRD stays in Port 2 automatically.\r\n"
+      "PORT1.MODE forces PORT1.CRD; PORT2.MODE forces PORT2.CRD.\r\n"
+      "Never leave both marker files present. Change slots only while off.\r\n"
+      "Each card uses .NEW/.BAK files for interrupted-write recovery.\r\n"
+      "Only one virtual slot is active at a time on the standard Pico 2 W.\r\n"
+      "Power off before removing the SD card or replacing card files.\r\n";
+  FIL file;
+  FRESULT result = f_open(&file, HP48_CARDS_README,
                           FA_WRITE | FA_CREATE_NEW);
   if (result == FR_EXIST) return true;
   if (result != FR_OK) return false;
@@ -151,7 +176,8 @@ storage_status_t storage_init(void) {
       !make_directory(HP48_PROGRAMS_DIR) ||
       !make_directory(HP48_INBOX_DIR) ||
       !make_directory(HP48_OUTBOX_DIR) ||
-      !create_programs_readme() || !create_port2_readme() ||
+      !create_programs_readme() || !create_cards_readme() ||
+      !create_port2_readme() ||
       !create_files_readme()) {
     s_status = STORAGE_FOLDER_FAILED;
     return s_status;

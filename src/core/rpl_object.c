@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <string.h>
 
+#include "core_runtime.h"
 #include "hp48_emu.h"
 
 /* HP 48G/GX System RPL variables in revision-R system RAM. */
@@ -59,6 +60,10 @@ static uint32_t read5(uint32_t address) {
 
 static void write5(uint32_t address, uint32_t value) {
   write_nibbles((long)address, (long)(value & 0xfffffu), 5);
+}
+
+bool hp48_rpl_port1_is_merged(void) {
+  return hp48_card_slot() == HP48_CARD_PORT1 && read5(DSKTOP) >= 0xc0000u;
 }
 
 static bool span_ok(uint32_t address, size_t length) {

@@ -4,7 +4,7 @@
 `HPHP48-W` header. It contains the string `"PICOCALC"` and no executable code.
 It is generated deterministically by `tools/make_sample_objects.py`.
 
-1. Boot `2.0.0` once with the SD card installed so the firmware creates
+1. Boot `2.1.0` once with the SD card installed so the firmware creates
    `/HP48GX/PROGRAMS/INBOX` and `OUTBOX`.
 2. Use the emulator's normal Save-and-OFF path before removing the SD card.
 3. Copy `PICOCALC.48G` into `/HP48GX/PROGRAMS/INBOX`, reinstall the card, and
@@ -24,8 +24,9 @@ SHA-256 for `PICOCALC.48G`:
 24e5a560e583e12d8bf95c4842cdb3e88f790e5b2c17c005d886521553d24c35  PICOCALC.48G
 ```
 
-`PORT1.MODE` enables 2.0.0's non-covered Port 1 compatibility card.
-Copy it to `/HP48GX/PROGRAMS/PORT1.MODE` while the PicoCalc is fully powered
-off. The next boot creates `PORT1.CRD`; import old machine-language libraries
-and store them to port number `1`. Remove the marker while powered off to
-return to the existing `PORT2.CRD` image.
+Fresh 2.1 installations create the non-covered `PORT1.CRD` automatically.
+Copy `PORT1.MODE` to `/HP48GX/PROGRAMS` while powered off to select it
+explicitly, or copy `PORT2.MODE` to select an existing covered `PORT2.CRD`.
+Never install both markers. An unmerged Port 1 accepts old machine-language
+libraries stored to port number `1`; the stock `MERGE1` command instead turns
+the whole card into expanded user memory.

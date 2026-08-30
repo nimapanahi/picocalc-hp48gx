@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/nimapanahi/picocalc-hp48gx/actions/workflows/ci.yml/badge.svg)](https://github.com/nimapanahi/picocalc-hp48gx/actions/workflows/ci.yml)
 
-Current stable version: **2.0.0** (`v2.0.0`)
+Current stable version: **2.1.0** (`v2.1.0`)
 
 This is a standalone native emulator for a ClockworkPi PicoCalc fitted with the
 standard Raspberry Pi Pico 2 W. It runs the public HP 48GX revision-R ROM,
@@ -11,11 +11,15 @@ full 49-key keyboard below the calculator display. The PicoCalc arrow pad moves 
 highlight like a finger, Space presses the highlighted HP key, and physical
 Enter is always the calculator's real ENTER key. It
 does not require PSRAM, MicroPython, Picoware, Wi-Fi, or an SD card to run.
-Version 2.0 adds optional SD-card storage, native sound, Port 1/2 card support,
+Version 2.0 added optional SD-card storage, native sound, Port 1/2 card support,
 temporal grayscale, and the completed physical/drawn-keyboard workflow.
+Version 2.1 makes a fresh virtual Port 1 card the standard card so the stock
+`MERGE1` command can expand the built-in 128 KiB user memory by another
+128 KiB. Existing 2.0 Port 2 images remain selected automatically.
 
-> **Release status:** 2.0.0 is feature complete for the project's planned main
-> feature set. It is not universally compatible with every HP 48 third-party
+> **Release status:** 2.1.0 includes the feature-complete 2.0 main feature set
+> plus supported Port 1 user-memory expansion. It is not universally
+> compatible with every HP 48 third-party
 > game or application. See [game compatibility tests](docs/GAME_TESTS.md) for
 > confirmed successes and known failures before installing a specific title.
 
@@ -211,9 +215,11 @@ The full Saturn CPU state and 128 KiB GX built-in RAM are restored automatically
 a manual save or Save-and-OFF. The state occupies the last 256 KiB of the Pico
 2 W's 4 MiB flash and is tied to the exact ROM. Saving happens only when you
 request it, avoiding unnecessary flash wear. Reflashing the firmware may erase
-the saved state.
+the saved state. When Port 1 is merged, its half of user memory remains in
+`PORT1.CRD`; every successful state save commits that image before updating the
+built-in-memory snapshot.
 
-### Version 2.0.0 SD-card storage
+### Version 2.1.0 SD-card storage and Port 1 expansion
 
 Insert a FAT32 or exFAT SD card before boot. The firmware mounts it without
 formatting it and creates this non-destructive directory layout:
@@ -223,10 +229,12 @@ formatting it and creates this non-destructive directory layout:
 └── PROGRAMS/
     ├── README.TXT
     ├── FILES.TXT
+    ├── CARDS.TXT
     ├── PORT2.TXT
-    ├── PORT2.CRD
-    ├── PORT1.MODE (optional compatibility marker)
-    ├── PORT1.CRD  (created only in compatibility mode)
+    ├── PORT1.CRD  (fresh 2.1 default)
+    ├── PORT2.CRD  (existing 2.0 card or explicit Port 2 mode)
+    ├── PORT1.MODE (optional explicit selector)
+    ├── PORT2.MODE (optional explicit selector)
     ├── INBOX/
     └── OUTBOX/
 ```
@@ -240,9 +248,10 @@ level 1, and Ctrl+F9 to export the current level-1 object. Exports are named
 `OUTBOX/STK000.48G` through `STK999.48G`; the first unused number is chosen, so
 an older file is never overwritten. Imports leave their source files intact.
 Ctrl+F7 only selects; it does not load the file. Ctrl+F8 queues the import until
-the HP ROM reaches its normal idle state, then reports the result. After it
-reports an import to level 1, store that object under a backup name such as `:2: MYPROG`
-and press Ctrl+F10 or Save-and-OFF to persist the changed Port 2 card image.
+the HP ROM reaches its normal idle state, then reports the result. Press
+Ctrl+F10 or use Save-and-OFF to persist the calculator state and active card.
+On an unmerged card, you can instead store the object as a backup under a name
+such as `:1: MYPROG` or `:2: MYPROG` for the active slot.
 
 A directory object is not executable directly from stack level 1, so `EVAL`
 is intentionally a no-op. To install one, enter a global name such as `'KAH'`
@@ -260,32 +269,40 @@ For a first hardware check, `samples/PICOCALC.48G` is a safe string object that
 should display `"PICOCALC"` at stack level 1 after import; `samples/README.md`
 contains the complete round-trip test.
 
-`PORT2.CRD` is a standard packed 128 KiB x48-compatible image that the HP ROM
-sees as a writable Port 2 RAM card. It is imported at boot. Ctrl+F10 and the
-normal Save-and-OFF path export any changes. Updates are first written to
-`PORT2.NEW`; the prior valid image is retained as `PORT2.BAK` so an interrupted
-save can be recovered on the next boot.
+`PORT1.CRD` and `PORT2.CRD` are standard packed 128 KiB x48-compatible images.
+A fresh 2.1 SD layout creates Port 1. If an existing 2.0 `PORT2.CRD` is found,
+the firmware keeps using it so an upgrade cannot silently switch or overwrite
+the user's card. `PORT1.MODE` explicitly selects Port 1 and `PORT2.MODE`
+explicitly selects Port 2; never leave both markers present. Only one virtual
+slot is mounted at a time to stay within the standard Pico 2 W's SRAM budget.
+Every save writes `.NEW`, retains the prior valid image as `.BAK`, and then
+promotes the new image.
 
-Some early machine-language libraries, including the tested
-`TETRISGX.LIB` 3.0, are not safe when executed from the GX's covered Port 2.
-To use one, power off, create a file named `PORT1.MODE` in this `PROGRAMS`
-folder (its contents do not matter), and boot. The footer reports `P1 NEW` or
-`P1 READY`, and the firmware uses a separate `PORT1.CRD`. Import the library,
-put `1` above it, execute `STO`, and warm-start the calculator before opening
-the Library catalog. Remove `PORT1.MODE` while powered off to return to the
-unchanged Port 2 image. Only one card is mounted at a time to stay within the
-Pico 2 W's SRAM budget.
+To expand user memory, boot with Port 1 active and execute the stock revision-R
+command `MERGE1` (type it in Alpha mode and press ENTER). The card changes from
+independent port memory to merged `SYSRAM`, adding its 128 KiB to the built-in
+128 KiB used by variables, directories, stack objects, and imported files.
+Press Ctrl+F10 after merging and after later changes. To reverse the merge,
+put an empty list `{ }` on the stack and execute `FREE1`; the calculator needs
+at least 128 KiB free to separate the card again. Never switch slots or replace
+`PORT1.CRD` while it contains merged memory.
+
+An unmerged Port 1 remains useful for older machine-language libraries such as
+the tested `TETRISGX.LIB` 3.0, which is not safe in the covered Port 2. Import
+the library, put `1` above it, execute `STO`, and warm-start before opening the
+Library catalog.
 
 On the first boot with a card, the emulator creates a blank image. Initialize
 that card once with purple/left-shift → drawn `2` → `NXT` → `PINIT`. Teal/
 right-shift → drawn `2` opens the catalog of attached libraries instead; its
 six softkeys are correctly blank before a library is installed and attached.
-`PINIT` is silent on a card that is already in the canonical empty state; 2.0.0
+`PINIT` is silent on a card that is already in the canonical empty state; 2.1.0
 shows an explicit footer confirmation when that softkey is delivered.
 Programs and other calculator objects can then be stored as backup objects on
 the active virtual card. Create the backup name with teal/right-shift plus the
 drawn `+` key labeled `::`, type the port, press Space, and enter the name
-(`:1: NAME` with `PORT1.MODE`, otherwise `:2: NAME`), then use `STO`. The
+(`:1: NAME` in unmerged Port 1, otherwise `:2: NAME` in Port 2), then use
+`STO`. A merged Port 1 is user memory rather than a backup-object port. The
 import footer now shows the matching active port. The card image
 can also be moved between the PicoCalc and
 x48-compatible desktop tools while the PicoCalc is fully powered off.
@@ -293,9 +310,9 @@ x48-compatible desktop tools while the PicoCalc is fully powered off.
 The boot footer reports the corresponding `P1` or `P2` ready, new, recovered,
 no-SD, bad-image, or I/O status. The emulator remains usable when
 no card is installed or it cannot be mounted. It will not overwrite a
-pre-existing `PORT2.CRD` of the wrong size. Do not remove the SD card while the
-emulator is running. See `docs/SD_CARD.md` for the complete workflow and
-limits.
+pre-existing `PORT1.CRD` or `PORT2.CRD` of the wrong size. Do not remove the SD
+card while the emulator is running. See `docs/SD_CARD.md` for the complete
+workflow and limits.
 
 ## Sound
 
@@ -321,8 +338,8 @@ both the startup diagnostic and HP-generated sounds.
 - PicoCalc battery percentage and charging indicator
 - HP one-bit speaker output on both PicoCalc speakers
 - Individual standard HP 48 binary-object inbox/import and numbered exports
-- SD-backed writable HP Port 2 card, or optional non-covered Port 1
-  compatibility card, with recoverable full-image import/export
+- SD-backed writable 128 KiB Port 1 expansion with stock-ROM `MERGE1`, or a
+  covered Port 2 card, with recoverable full-image import/export
 - HP real-time clock, Timer 1/2 interrupts, ON/wake, and shutdown behavior
 - Direct ILI9488 LCD and STM32 keyboard-controller drivers for PicoCalc
 - ROM validation and a ROM-free UF2 patching workflow
@@ -330,8 +347,8 @@ both the startup diagnostic and HP-generated sounds.
 Not currently emulated: simultaneous Port 1 and Port 2 cards, serial/Kermit,
 infrared, plain-text UserRPL compilation, or an on-screen file-picker dialog.
 Individual files are selected
-with Ctrl+F7 and transferred with Ctrl+F8/F9; the complete native Port 2 image
-remains available as a second storage workflow.
+with Ctrl+F7 and transferred with Ctrl+F8/F9; complete native card images remain
+available as a second storage workflow.
 The Wi-Fi radio is unused. This build has been cross-compiled for `pico2_w`,
 the UF2 metadata has been inspected, and the real revision-R ROM completed a
 10.24-million-instruction boot smoke test with its LCD on and no illegal
@@ -351,7 +368,7 @@ each candidate's panel timing, keyboard controller, SD card, and audio path.
 - Confirm you flashed `hp48gx_picocalc.uf2`, not the ROM-free file whose name
   contains `template`.
 - Power the PicoCalc fully off for ten seconds, then start it and wait five
-  seconds. The firmware briefly shows `HP48GX 2.0.0`, then the drawn
+  seconds. The firmware briefly shows `HP48GX 2.1.0`, then the drawn
   keyboard appears below the HP display.
 - If it is still blank, note whether the panel is completely unlit or is lit
   gray/black. That distinction identifies backlight/power versus LCD-data
@@ -372,8 +389,8 @@ git submodule update --init --recursive
 
 The result is `build/hp48gx_picocalc.uf2`. The configuration targets
 `pico2_w`, runs the RP2350 at its stock 150 MHz, and reserves the final 256 KiB
-of flash for state. The 2.0.0 test build uses 430,560 bytes of static
-SRAM and 1,241,300 bytes of flash including the 1 MiB unpacked ROM.
+of flash for state. The 2.1.0 release build uses 430,560 bytes of static SRAM
+and 1,242,148 bytes of flash including the 1 MiB unpacked ROM.
 
 ## License and provenance
 

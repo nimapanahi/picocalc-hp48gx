@@ -168,7 +168,15 @@ def main() -> None:
     markers = read_markers(args.capture / "markers.csv")
     args.output.parent.mkdir(parents=True, exist_ok=True)
 
-    segments = [
+    segments = []
+    if {"merge1_memory_before", "merge1_memory_after"} <= markers.keys():
+        segments.append(
+            ("merge1_memory_before", "merge1_memory_after", 8,
+             "Memory expansion: MERGE1",
+             "Virtual 128 KiB Port 1 RAM merged with built-in user memory",
+             2.5)
+        )
+    segments.extend([
         ("cas_factor_input", "cas_factor_result", 40, "CAS 1/4: FACTOR",
          "Factor X^4 - 5*X^2 + 4", 1.5),
         ("cas_factor_result", "cas_diff_result", 42, "CAS 2/4: DIFF",
@@ -188,21 +196,32 @@ def main() -> None:
         ("parametric_surface_start", "parametric_surface_result", 18,
          "Plot 2/2: 3D parametric surface",
          "HP TEACH PR-SURFACE example, rendered by revision-R ROM", 2.0),
-    ]
+    ])
 
     with tempfile.TemporaryDirectory(prefix="hp48-calculator-video.") as temporary:
         work = Path(temporary)
         parts: list[Path] = []
+        has_merge = segments[0][0] == "merge1_memory_before"
         cards = [
-            ("Calculator, CAS, matrix, and graph validation",
+            (("Memory, calculator, CAS, matrix, and graph validation"
+              if has_merge else
+              "Calculator, CAS, matrix, and graph validation"),
              "Exact ROM execution; captured beeper audio is preserved at 60 percent"),
+            ("128 KiB Port 1 expansion",
+             "MEM before and after the stock revision-R MERGE1 command"),
             ("Symbolic algebra (CAS)",
              "Factor, differentiate, integrate, and solve"),
             ("Matrix operations", "2x2 inverse and matrix multiplication"),
             ("2D and 3D graphing",
              "Four functions followed by a parametric surface"),
         ]
-        card_positions = {0: cards[0:2], 4: cards[2:3], 6: cards[3:4]}
+        cas_index = 1 if has_merge else 0
+        matrix_index = cas_index + 4
+        plot_index = matrix_index + 2
+        card_positions = {0: cards[0:2] if has_merge else cards[0:1]}
+        card_positions.setdefault(cas_index, []).append(cards[2])
+        card_positions.setdefault(matrix_index, []).append(cards[3])
+        card_positions.setdefault(plot_index, []).append(cards[4])
         part_number = 0
         for index, segment in enumerate(segments):
             for heading, detail in card_positions.get(index, []):
@@ -212,7 +231,11 @@ def main() -> None:
                 part_number += 1
             start_label, end_label, fps, label, detail, hold = segment
             start = markers[start_label]
-            if index in (1, 2, 3, 4, 5):
+            if start_label in {
+                "cas_factor_result", "cas_diff_result",
+                "cas_integrate_result", "cas_solve_result",
+                "matrix_inverse_result",
+            }:
                 start = min(markers[end_label], start + 10)
             clip = work / f"{part_number:02d}-capture.mp4"
             make_segment(

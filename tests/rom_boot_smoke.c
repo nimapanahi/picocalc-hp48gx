@@ -298,7 +298,8 @@ static void print_usage(const char *program) {
           "[--directory-enter-count 1..8] [--directory-form-down 0..8] "
           "[--directory-start-softkey 1..6] "
           "[--library-setup 1..6] [--library-command 1..6] "
-          "[--library-profile android] [--calculator-profile]\n",
+          "[--library-profile android] [--calculator-profile] "
+          "[--merge1-profile]\n",
           program);
 }
 
@@ -317,6 +318,7 @@ int main(int argc, char **argv) {
   unsigned library_command = 1;
   bool library_profile_android = false;
   bool calculator_profile = false;
+  bool merge1_profile = false;
   unsigned library_setup[6];
   unsigned library_setup_count = 0;
   test_platform_time_instruction_driven = 1;
@@ -356,6 +358,8 @@ int main(int argc, char **argv) {
     }
     else if (strcmp(argv[i], "--calculator-profile") == 0)
       calculator_profile = true;
+    else if (strcmp(argv[i], "--merge1-profile") == 0)
+      merge1_profile = true;
     else {
       print_usage(argv[0]);
       return 2;
@@ -389,6 +393,12 @@ int main(int argc, char **argv) {
     return 2;
   }
   if (launch_library && !use_port0 && !use_port1) use_port2 = true;
+  if (merge1_profile && !use_port0 && !use_port1 && !use_port2)
+    use_port1 = true;
+  if (merge1_profile && !use_port1) {
+    fprintf(stderr, "--merge1-profile requires Port 1\n");
+    return 2;
+  }
 
   FILE *fp = fopen(argv[1], "rb");
   if (!fp) {
@@ -423,7 +433,7 @@ int main(int argc, char **argv) {
          test_sound_short_samples, enter_debugger);
 
   if ((test_rpl || test_library || launch_directory || launch_program ||
-       launch_library || calculator_profile) &&
+       launch_library || calculator_profile || merge1_profile) &&
       !enter_debugger) {
     /* A completely blank GX RAM pauses at "Try to Recover Memory?". Select
      * the rightmost NO softkey so the ROM finishes creating its RPL heaps. */
@@ -434,6 +444,72 @@ int main(int argc, char **argv) {
       hp48_core_run(2000000);
     }
     hp48_core_run(1000000);
+  }
+
+  if (merge1_profile && !enter_debugger) {
+    uint32_t avmem_before = (uint32_t)read_nibbles(0x807ed, 5);
+    uint32_t temp_before = (uint32_t)read_nibbles(0x806ee, 5);
+    uint32_t rsk_before = (uint32_t)read_nibbles(0x806f3, 5);
+    uint32_t dsk_before = (uint32_t)read_nibbles(0x806f8, 5);
+    uint32_t display_before = display_checksum();
+    uint32_t card_before = port2_checksum();
+    hp48_port2_mark_clean();
+    if (!type_command("MEM", 2000000)) {
+      fprintf(stderr, "Could not display pre-MERGE1 memory\n");
+      free(rom);
+      return 1;
+    }
+    test_capture_marker("merge1_memory_before");
+    if (!clear_stack()) {
+      fprintf(stderr, "Could not clear pre-MERGE1 memory result\n");
+      free(rom);
+      return 1;
+    }
+    if (!type_alpha_word("MERGE")) {
+      fprintf(stderr, "Could not type MERGE1\n");
+      free(rom);
+      return 1;
+    }
+    tap_key(digit_code('1'), 250000);
+    tap_key(0x44, 12000000);
+    uint32_t avmem_after = (uint32_t)read_nibbles(0x807ed, 5);
+    uint32_t temp_after = (uint32_t)read_nibbles(0x806ee, 5);
+    uint32_t rsk_after = (uint32_t)read_nibbles(0x806f3, 5);
+    uint32_t dsk_after = (uint32_t)read_nibbles(0x806f8, 5);
+    uint32_t display_after = display_checksum();
+    uint32_t card_after = port2_checksum();
+    if (!type_command("MEM", 2000000)) {
+      fprintf(stderr, "Could not display post-MERGE1 memory\n");
+      free(rom);
+      return 1;
+    }
+    test_capture_marker("merge1_memory_after");
+    printf("merge1 avmem=%05x->%05x delta=%u card=%08x->%08x "
+           "dirty=%d display=%08x->%08x halted=%d "
+           "mctl-ram=%05x/%05x mctl-p1=%05x/%05x status=%x\n",
+           avmem_before, avmem_after, avmem_after - avmem_before,
+           card_before, card_after, hp48_port2_dirty(), display_before,
+           display_after, enter_debugger,
+           (unsigned)saturn.mem_cntl[MCTL_SysRAM_GX].config[0],
+           (unsigned)saturn.mem_cntl[MCTL_SysRAM_GX].config[1],
+           (unsigned)saturn.mem_cntl[MCTL_PORT1_GX].config[0],
+           (unsigned)saturn.mem_cntl[MCTL_PORT1_GX].config[1],
+           (unsigned)saturn.card_status);
+    printf("merge1 pointers temp=%05x->%05x rsk=%05x->%05x "
+           "dsk=%05x->%05x\n", temp_before, temp_after, rsk_before,
+           rsk_after, dsk_before, dsk_after);
+    if (enter_debugger || avmem_after <= avmem_before ||
+        !hp48_rpl_port1_is_merged() ||
+        !hp48_port2_dirty()) {
+      fprintf(stderr, "MERGE1 did not add the Port 1 RAM to user memory\n");
+      free(rom);
+      return 1;
+    }
+    if (!clear_stack()) {
+      fprintf(stderr, "Could not clear post-MERGE1 memory result\n");
+      free(rom);
+      return 1;
+    }
   }
 
   if (test_library && !enter_debugger) {
@@ -590,6 +666,11 @@ int main(int argc, char **argv) {
   }
 
   if (calculator_profile && !enter_debugger) {
+    if (!clear_stack()) {
+      fprintf(stderr, "Could not clear the stack before calculator profile\n");
+      free(rom);
+      return 1;
+    }
     uint32_t home_before = display_checksum();
     unsigned depth_before = hp48_rpl_stack_depth();
     if (!type_algebraic("X^4-5*X^2+4")) {

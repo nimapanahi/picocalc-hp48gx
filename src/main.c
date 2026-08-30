@@ -53,7 +53,11 @@ static bool service_idle_file_import(void) {
     if (hp48_rpl_stack_level1_is_directory())
       snprintf(message, sizeof(message),
                "DIR L1: 'NAME' ENTER STO; VAR -> NAME");
-    else {
+    else if (hp48_rpl_port1_is_merged()) {
+      snprintf(message, sizeof(message),
+               "IMPORTED %.14s -> L1; CTRL+F10 SAVES",
+               object_files_selected_name());
+    } else {
       unsigned destination_port =
           hp48_card_slot() == HP48_CARD_PORT1 ? 1u : 2u;
       snprintf(message, sizeof(message),

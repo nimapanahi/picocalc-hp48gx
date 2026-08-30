@@ -10,6 +10,7 @@
 #define PORT2_NEW "0:/HP48GX/PROGRAMS/PORT2.NEW"
 #define PORT2_BACKUP "0:/HP48GX/PROGRAMS/PORT2.BAK"
 #define PORT1_MODE "0:/HP48GX/PROGRAMS/PORT1.MODE"
+#define PORT2_MODE "0:/HP48GX/PROGRAMS/PORT2.MODE"
 #define PORT1_IMAGE "0:/HP48GX/PROGRAMS/PORT1.CRD"
 #define PORT1_NEW "0:/HP48GX/PROGRAMS/PORT1.NEW"
 #define PORT1_BACKUP "0:/HP48GX/PROGRAMS/PORT1.BAK"
@@ -22,7 +23,7 @@ typedef enum {
 } image_result_t;
 
 static port2_card_status_t s_status = PORT2_CARD_NO_SD;
-static hp48_card_slot_t s_slot = HP48_CARD_PORT2;
+static hp48_card_slot_t s_slot = HP48_CARD_PORT1;
 
 static const char *image_path(void) {
   return s_slot == HP48_CARD_PORT1 ? PORT1_IMAGE : PORT2_IMAGE;
@@ -176,14 +177,32 @@ port2_card_status_t port2_card_init(void) {
     return s_status;
   }
 
-  FILINFO mode_info;
-  FRESULT mode_result = f_stat(PORT1_MODE, &mode_info);
-  if (mode_result != FR_OK && mode_result != FR_NO_FILE &&
-      mode_result != FR_NO_PATH) {
+  image_result_t port1_mode = image_info(PORT1_MODE);
+  image_result_t port2_mode = image_info(PORT2_MODE);
+  /* Marker contents and sizes are intentionally ignored. image_info still
+   * distinguishes a missing path from an SD I/O failure. */
+  bool force_port1 = port1_mode != IMAGE_MISSING;
+  bool force_port2 = port2_mode != IMAGE_MISSING;
+  if (port1_mode == IMAGE_IO_ERROR || port2_mode == IMAGE_IO_ERROR) {
     s_status = PORT2_CARD_IO_ERROR;
     return s_status;
   }
-  s_slot = mode_result == FR_OK ? HP48_CARD_PORT1 : HP48_CARD_PORT2;
+  if (force_port1 && force_port2) {
+    s_status = PORT2_CARD_MODE_ERROR;
+    return s_status;
+  }
+
+  if (force_port1) {
+    s_slot = HP48_CARD_PORT1;
+  } else if (force_port2) {
+    s_slot = HP48_CARD_PORT2;
+  } else {
+    image_result_t port2_image = image_info(PORT2_IMAGE);
+    /* Preserve a 2.0 installation's Port 2 card automatically. A fresh SD
+     * (neither image exists) gets the new 2.1 Port 1 expansion card. */
+    s_slot = port2_image != IMAGE_MISSING ? HP48_CARD_PORT2
+                                          : HP48_CARD_PORT1;
+  }
 
   image_result_t current = load_image(image_path());
   if (current == IMAGE_OK) {
@@ -216,6 +235,8 @@ const char *port2_card_status_label(void) {
       return s_slot == HP48_CARD_PORT1 ? "P1 BAD IMAGE" : "P2 BAD IMAGE";
     case PORT2_CARD_IO_ERROR:
       return s_slot == HP48_CARD_PORT1 ? "P1 IO ERR" : "P2 IO ERR";
+    case PORT2_CARD_MODE_ERROR:
+      return "CARD MODE ERR";
     default: return "CARD ERR";
   }
 }
